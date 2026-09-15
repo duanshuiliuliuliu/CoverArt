@@ -1,0 +1,15 @@
+{
+  "name": "coverart",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CoverArt — 一个窗口就是一张专辑封面",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:exe": "tauri build --no-bundle",
+    "icon": "tauri icon scripts/icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

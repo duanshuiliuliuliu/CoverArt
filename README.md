@@ -1,0 +1,82 @@
+# CoverArt
+
+一个 Windows 桌面小窗口：**打开就是一张专辑封面，窗口和封面一样大**。
+
+当前状态：原型（`coverart-mini.html`，浏览器里双击就能看）+ 已经能跑的 Windows 程序（Tauri 2 + WebView2）。
+
+## 运行与打包
+
+前置：Node 18+、Rust（MSVC 工具链，仓库里 `src-tauri/rust-toolchain` 未固定，用 stable 即可）、WebView2（Win10/11 自带）。
+
+```bash
+npm install          # 只装 Tauri CLI，界面本身零依赖、没有打包步骤
+npm run dev          # 开发模式：改 ui/index.html 直接生效、热重载
+npm run build:exe    # 只出 exe：src-tauri/target/release/coverart.exe
+npm run build        # 出 NSIS 安装包：src-tauri/target/release/bundle/nsis/
+```
+
+## 目录
+
+```
+CoverArt/
+├─ ui/index.html              界面本体（单文件，原生 HTML/CSS/JS，没有构建步骤）
+├─ src-tauri/
+│  ├─ src/main.rs             只做一件事：起窗口
+│  ├─ tauri.conf.json         窗口尺寸 / 无边框 / 不可缩放 都在这里
+│  └─ icons/                  应用图标（由 scripts/gen_icon.mjs 生成）
+├─ scripts/
+│  ├─ gen_icon.mjs            纯 Node 画图标源图（深色圆角块 + 唱片环）
+│  ├─ verify_window.ps1       启动 exe，核对窗口尺寸/不可缩放/托盘/内容是否渲染
+│  └─ verify_single_instance.ps1  连开两个实例，核对单实例是否生效
+└─ coverart-mini.html         浏览器原型（保留，用来快速试视觉）
+```
+
+## 窗口规格（`src-tauri/tauri.conf.json`）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 尺寸 | **560 × 560** | 固定尺寸，改这里就够 |
+| 可缩放 | **false** | 拖不了边，也没有最大化按钮（实测无 `WS_THICKFRAME` / `WS_MAXIMIZEBOX`） |
+| 边框 | `decorations: false` | 无标题栏，整个窗口就是封面 |
+| 拖动窗口 | **整窗可拖** | 按住封面任意空白处移动超过 4px 才开始拖，所以点一下/双击仍然是原来的交互 |
+| 右键 | 主窗口里已禁用右键菜单 | `contextmenu` 直接 preventDefault |
+| 右上角 ✕ | 收起到托盘（不退出） | 悬浮才出现的磨砂圆钮，和 详情/下载 同一种材质 |
+| 关闭 | Alt+F4 / ✕ 都只是收起到托盘 | 真正退出走托盘菜单的「退出」 |
+
+## 托盘
+
+- **左键单击**：显示 / 隐藏窗口
+- **右键菜单**：
+  - 显示 / 隐藏（跟随窗口当前状态）
+  - 缩放 ▸ **50% / 75% / 100% / 125% / 150%**（勾选当前档位）
+  - 退出
+
+缩放同时做两件事：窗口边长 = 560 × 档位，界面 zoom 也按同比例变化——这样「窗口 = 封面」的比例在任何档位都成立，界面里的按钮、字号相对封面的大小始终一致。档位写进 `%APPDATA%\com.coverart.desktop\prefs.json`，下次启动自动恢复。
+
+## 单实例
+
+程序只允许开一个：再次启动时**第二个进程直接退出**，并把已经开着的那个窗口叫到最前面（`tauri-plugin-single-instance`，注册在所有插件最前面）。实测：连开两个后进程数仍为 1，剩下的是先启动的那个。
+
+## 图标
+
+```bash
+node scripts/gen_icon.mjs   # 生成 scripts/icon.png（1024×1024）
+npm run icon                # 生成 src-tauri/icons/ 全套（含 icon.ico）
+```
+
+`tauri icon` 会顺带生成 `icons/android`、`icons/ios`，Windows 用不到，可以删。
+
+## 界面约定
+
+- 静止时只剩封面；鼠标靠近才出现控件，停下 2.6 秒又收走
+- ← → 换封面 ｜ 双击 / 空格翻面看曲目 ｜ 打字或 ⌘K 搜索 ｜ T 回到今天
+- 每天一屏 20 张，按日期种子轮换；左上角「发行纪念日」角标在专辑发行当天出现
+- 右下角：`3/20` 序号胶囊 + 详情 + 下载（下载取 3000×3000 原图）
+- 从搜索里选中的专辑不在今日队列里：顶栏先收起、鼠标一动再回来（两个标签都不高亮），左右箭头不出现
+
+## 待办
+
+- 托盘菜单里再加：「置顶」「回到今日」「复制封面链接」；可选「开机自启」
+- 封面图与 lookup 结果落本地缓存，断网也能翻
+- 下载改走 Rust 命令写进「图片」目录（现在是浏览器下载）
+- 打包时把图标里用不到的 android/ios 目录去掉
