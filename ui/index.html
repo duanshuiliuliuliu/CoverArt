@@ -211,8 +211,7 @@
   .nv svg{width:24px; height:24px}
   .nv.prev{left:6px}
   .nv.next{right:6px}
-  /* 正在看一张搜索选来的专辑：左右箭头不出现（它不在今日队列里，没有上一张/下一张） */
-  #win.hud-on.mode-guest .nv{opacity:0; pointer-events:none; filter:none}
+  /* 正在看一张搜索选来的专辑：左右箭头照常可用——翻的是「搜索结果那一串」 */
   /* 刚选中搜索结果那一下，顶栏先收起来；鼠标一动就回来（回来时两个标签都不高亮） */
   #win.hud-on.tb-late .topbar{opacity:0; pointer-events:none}
 
@@ -552,6 +551,8 @@ let pos = 0;
 let current = null;
 let mode = "day";       /* day（今日这一屏）| search（搜索浮层）| guest（搜索选来的专辑） */
 let guest = false;      /* true = 当前看的是搜索结果，不在今日队列里 */
+let guestList = [];     /* 搜索选中之后，左右箭头翻的就是这一串结果 */
+let guestIndex = 0;     /* 当前看的是这串里的第几个 */
 let flipped = false;
 let searchOpen = false;
 
@@ -597,10 +598,19 @@ function paint(album){
 
   document.getElementById("m-title").textContent = album.title;
   document.getElementById("m-artist").textContent = album.artist;
-  /* 右下角：第几张 / 共几张（搜索来的专辑不在今日队列里，就不显示序号） */
+  /* 右下角：第几张 / 共几张。看今日这一屏时是队列里的位置，
+     看搜索结果时是「这串结果里的第几个」 */
   const countEl = document.getElementById("m-count");
-  countEl.textContent = guest ? "" : `${pos + 1}/${queue.length}`;
-  countEl.title = guest ? "" : `第 ${pos + 1} 张 · 共 ${queue.length} 张`;
+  if (guest && guestList.length > 1){
+    countEl.textContent = `${guestIndex + 1}/${guestList.length}`;
+    countEl.title = `搜索结果 第 ${guestIndex + 1} 张 · 共 ${guestList.length} 张`;
+  } else if (guest){
+    countEl.textContent = "";
+    countEl.title = "";
+  } else {
+    countEl.textContent = `${pos + 1}/${queue.length}`;
+    countEl.title = `第 ${pos + 1} 张 · 共 ${queue.length} 张`;
+  }
   document.getElementById("badge").hidden = !album._anniv;
   document.title = `${album.artist} — ${album.title}`;
 
@@ -652,7 +662,15 @@ function adaptChrome(img){
 
 /* 预加载左右邻居，切换时基本是秒开 */
 function preloadNeighbours(){
-  if (guest) return;
+  /* 看搜索结果时，预加载的是相邻的那两条结果 */
+  if (guest){
+    if (guestList.length < 2) return;
+    [1, -1].forEach((d) => {
+      const a = guestList[(guestIndex + d + guestList.length) % guestList.length];
+      if (a){ const im = new Image(); im.src = art(a, SIZE.mid); }
+    });
+    return;
+  }
   [1, -1].forEach((d) => {
     const a = queue[(pos + d + queue.length) % queue.length];
     if (a){ const im = new Image(); im.src = art(a, SIZE.mid); }
@@ -669,8 +687,14 @@ function show(album, { isGuest = false } = {}){
 }
 
 function step(d){
-  /* 搜索选来的专辑不在今日队列里，没有上一张/下一张可翻 */
-  if (guest) return;
+  /* 看搜索结果时：左右箭头在「搜索结果的队列」里翻 */
+  if (guest){
+    if (guestList.length < 2) return;
+    guestIndex = (guestIndex + d + guestList.length) % guestList.length;
+    show(guestList[guestIndex], { isGuest: true });
+    flash(true);
+    return;
+  }
   pos = (pos + d + queue.length) % queue.length;
   show(queue[pos]);
   flash(true);
@@ -911,8 +935,8 @@ function setTabs(){
   document.querySelectorAll(".topbar button").forEach((b) =>
     b.setAttribute("aria-selected", String(b.id === activeId)));
   win.classList.toggle("mode-guest", mode === "guest");
-  /* 左右箭头只在今日这一屏里可用（这时它们本来也不显示，禁用只是双保险） */
-  ["prev", "next"].forEach((id) => { document.getElementById(id).disabled = (mode === "guest"); });
+  /* 左右箭头两种模式都可用：今日这一屏里翻队列，看搜索结果时翻结果 */
+  ["prev", "next"].forEach((id) => { document.getElementById(id).disabled = false; });
 }
 
 function renderResults(){
@@ -932,11 +956,12 @@ function renderResults(){
 function pick(i){
   const a = results[i];
   if (!a) return;
-  /* 选中的专辑要是在今日队列里，就把指针挪过去，序号才不会说谎 */
-  const at = queue.findIndex((q) => key(q) === key(a));
   closeSearch();
-  if (at >= 0){ pos = at; guest = false; show(queue[at]); }
-  else show(a, { isGuest: true });
+  /* 选中之后进入「浏览搜索结果」：左右箭头在这一串结果里翻，
+     想回今日这一屏点顶栏「每日」或按 T */
+  guestList = results.slice();
+  guestIndex = i;
+  show(a, { isGuest: true });
   /* 刚从搜索结果过来：把控件先亮着，让人一眼看到序号和左右箭头 */
   flash(false);
   /* 这一刻顶栏先收起来，鼠标一动它才回来（回来时「每日/搜索」都不高亮） */
