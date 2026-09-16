@@ -157,7 +157,7 @@
     /* 位置和宽度全部由 CSS 决定（「每日」「搜索」都是两个字，等宽），
        不依赖 JS 量尺寸，也就不会出现"滑块卡在半路"的状态 */
     position:absolute; top:3px; bottom:3px; left:3px;
-    width:calc((100% - 8px) / 2); border-radius:999px;
+    width:calc((100% - 10px) / 3); border-radius:999px;   /* 三个标签，等宽 */
     background:linear-gradient(180deg, rgba(255,255,255,.97), rgba(255,255,255,.82));
     box-shadow:
       inset 0 .5px 0 rgba(255,255,255,1),
@@ -166,7 +166,13 @@
       0 6px 18px rgba(0,0,0,.26);
     transition:transform .46s var(--ease), width .46s var(--ease), opacity .3s var(--ease);
   }
-  .topbar:has(#tab-search[aria-selected="true"]) .pill{transform:translateX(calc(100% + 2px))}
+  .topbar:has(#tab-day[aria-selected="true"]) .pill{transform:translateX(0)}
+  .topbar:has(#tab-fav[aria-selected="true"]) .pill{transform:translateX(calc(100% + 2px))}
+  .topbar:has(#tab-search[aria-selected="true"]) .pill{transform:translateX(calc((100% + 2px) * 2))}
+  /* 收藏为空时这个标签不可点 */
+  .topbar button:disabled{opacity:.38; cursor:default}
+  .topbar button:disabled:hover{color:rgba(255,255,255,.72)}
+  #win.on-light .topbar button:disabled:hover{color:rgba(28,28,30,.74)}
   /* 两种都不选中（正在看搜索选来的专辑）时，滑块收起来 */
   #win.mode-guest .pill{opacity:0}
   .topbar button{
@@ -374,6 +380,24 @@
   #hint.off{opacity:0; transition:opacity .6s var(--ease)}
   /* 右上角：收起到托盘（Tauri 里才有，浏览器打开时会被脚本移除） */
   .close-btn{position:absolute; top:12px; right:12px; z-index:4}
+
+  /* 右键弹出的收藏心形：位置由 JS 设在鼠标处，默认空心，收藏后变红并轻跳一下 */
+  .heart{
+    position:absolute; z-index:6; width:38px; height:38px; margin:-19px 0 0 -19px;
+    display:grid; place-items:center; border-radius:50%;
+    background:rgba(0,0,0,.38); color:rgba(255,255,255,.92);
+    -webkit-backdrop-filter:blur(16px) saturate(170%); backdrop-filter:blur(16px) saturate(170%);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.16), 0 6px 18px rgba(0,0,0,.35);
+    opacity:0; transform:scale(.6); pointer-events:none;
+    transition:opacity .18s var(--ease), transform .18s var(--ease),
+               background-color .18s var(--ease), color .18s var(--ease);
+  }
+  .heart.show{opacity:1; transform:scale(1); pointer-events:auto}
+  .heart.show:hover{background:rgba(0,0,0,.55)}
+  .heart.faved{color:#ff3b30}          /* 已收藏：红心 */
+  .heart.pop{transform:scale(1.18)}
+  .heart svg{width:20px; height:20px}
+  .heart.faved svg{fill:currentColor}
   @media (prefers-reduced-motion:reduce){
     *{animation-duration:.001ms !important; transition-duration:.001ms !important}
   }
@@ -392,6 +416,13 @@
       <div class="frost"></div>
       <div class="veil"></div>
       <div class="badge" id="badge" hidden>发行纪念日</div>
+
+      <!-- 右键出现的收藏心形：跟着鼠标位置弹出来，点一下收藏（红心），再点取消 -->
+      <button class="heart" id="heart" type="button" aria-label="收藏" title="收藏 / 取消收藏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20.3 4.9 13.4A4.6 4.6 0 0 1 12 7.3a4.6 4.6 0 0 1 7.1 6.1Z"/>
+        </svg>
+      </button>
 
       <!-- 右上角：收起到托盘 -->
       <button class="icon-btn close-btn" id="btn-close" type="button" aria-label="收起到托盘" title="收起到托盘">
@@ -460,6 +491,7 @@
   <div class="topbar" role="tablist" aria-label="视图">
     <span class="pill" id="tab-pill" aria-hidden="true"></span>
     <button id="tab-day" type="button" role="tab" aria-selected="true">每日</button>
+    <button id="tab-fav" type="button" role="tab" aria-selected="false" disabled>收藏</button>
     <button id="tab-search" type="button" role="tab" aria-selected="false">搜索</button>
   </div>
 
@@ -564,6 +596,12 @@ let mode = "day";       /* day（今日这一屏）| search（搜索浮层）| g
 let guest = false;      /* true = 当前看的是搜索结果，不在今日队列里 */
 let guestList = [];     /* 搜索选中之后，左右箭头翻的就是这一串结果 */
 let guestIndex = 0;     /* 当前看的是这串里的第几个 */
+let source = "day";     /* day = 今日这一屏 ｜ fav = 我的收藏 */
+const srcPos = { day: 0, fav: 0 };   /* 两个队列各自记住翻到哪儿 */
+let favs = [];          /* 收藏列表（顺序 = 收藏时间） */
+let favIds = new Set(); /* "id:sf"，用来判断当前这张是否已收藏 */
+let coversBase = "";    /* 本地封面目录（Tauri 下由 Rust 给出） */
+let invoke = null;      /* Tauri 的命令入口；浏览器里保持 null */
 let flipped = false;
 let searchOpen = false;
 
@@ -618,6 +656,112 @@ function carTick(){
 }
 /* 用户自己切过之后，这张按 1.5 倍时长算 */
 function carManualHold(){ car.hold = carMs() * CAR_MANUAL_MULT; }
+
+/* ---------------- 收藏 ---------------- */
+const favKey = (a) => a.id + ":" + (a.sf || "");
+/* Tauri 里本地图片要用 asset 协议转成可访问的 URL；浏览器里没有这些，走原路径 */
+function localUrl(path){
+  const T = window.__TAURI__;
+  if (T && T.core && T.core.convertFileSrc) return T.core.convertFileSrc(path);
+  return path;
+}
+/* 收藏条目 → 界面用的专辑对象（有本地封面就优先用本地） */
+function favToAlbum(f){
+  return {
+    id: f.id, sf: f.sf, title: f.title, artist: f.artist,
+    date: f.date || "", genre: f.genre || "", tracks: f.tracks || 0, art: f.art,
+    local: f.cover && coversBase ? localUrl(coversBase + "/" + f.cover) : "",
+  };
+}
+function applyFavList(list){
+  favs = Array.isArray(list) ? list : [];
+  favIds = new Set(favs.map(favKey));
+  document.getElementById("tab-fav").disabled = favs.length === 0;
+  updateHeart();
+}
+function updateHeart(){
+  const h = document.getElementById("heart");
+  h.classList.toggle("faved", !!(current && favIds.has(favKey(current))));
+}
+let heartTimer;
+const HEART_IDLE = 2600;          /* 心形静置多久后收走 */
+function hideHeart(){
+  clearTimeout(heartTimer);
+  document.getElementById("heart").classList.remove("show");
+}
+/* 右键：心形出现在鼠标位置（收藏时是红心，未收藏是空心） */
+function showHeartAt(clientX, clientY){
+  const h = document.getElementById("heart");
+  const rect = win.getBoundingClientRect();
+  h.style.left = (clientX - rect.left) + "px";
+  h.style.top = (clientY - rect.top) + "px";
+  updateHeart();
+  h.classList.add("show");
+  clearTimeout(heartTimer);
+  heartTimer = setTimeout(hideHeart, HEART_IDLE);
+}
+async function toggleFavorite(){
+  const a = current;
+  if (!a) return;
+  const on = favIds.has(favKey(a));
+  const h = document.getElementById("heart");
+  if (typeof invoke === "function"){
+    try {
+      const list = on
+        ? await invoke("remove_favorite", { id: a.id, sf: a.sf })
+        : await invoke("add_favorite", {
+            album: {
+              id: a.id, sf: a.sf, title: a.title, artist: a.artist,
+              date: a.date || "", genre: a.genre || "", tracks: a.tracks || 0, art: a.art,
+            },
+          });
+      applyFavList(list);
+    } catch (err){
+      return;
+    }
+  } else {
+    /* 浏览器预览：只做视觉上的切换，不落盘（收藏列表本身仍然为空） */
+    if (on) favIds.delete(favKey(a)); else favIds.add(favKey(a));
+    updateHeart();
+  }
+  h.classList.add("pop");
+  setTimeout(() => h.classList.remove("pop"), 320);
+  /* 点完先别急着收：留一会儿，方便"再点一下取消收藏" */
+  clearTimeout(heartTimer);
+  heartTimer = setTimeout(hideHeart, HEART_IDLE);
+  /* 正在收藏视图里取消了当前这张：从队列里挪走 */
+  if (source === "fav") rebuildFavQueue();
+}
+function rebuildFavQueue(){
+  const items = favs.map(favToAlbum);
+  if (!items.length){ switchSource("day"); return; }
+  queue = items;
+  pos = Math.min(pos, items.length - 1);
+  srcPos.fav = pos;
+  show(queue[pos]);
+}
+
+/* ---------------- 两个队列（今日 / 收藏） ---------------- */
+function queueFor(src){
+  return src === "fav" ? favs.map(favToAlbum) : buildQueue(dayKey);
+}
+function setPos(p){
+  pos = p;
+  srcPos[source] = p;
+}
+function switchSource(next){
+  if (next === source) return;
+  srcPos[source] = pos;                 /* 记住这个队列翻到哪儿了 */
+  source = next;
+  queue = queueFor(source);
+  if (!queue.length){ source = "day"; queue = queueFor("day"); }
+  pos = Math.min(srcPos[source] || 0, Math.max(0, queue.length - 1));
+  srcPos[source] = pos;
+  guest = false;
+  carStop(); car.left = -1; carManualHold();
+  show(queue[pos]);
+  flash(true);
+}
 const STORE = {
   get(k, fallback){
     try { const v = localStorage.getItem("coverart.mini." + k); return v === null ? fallback : JSON.parse(v); }
@@ -668,7 +812,7 @@ function paint(album){
     errText.textContent = "封面加载失败，可能是网络问题或 Apple 图床被限流。";
     errBox.hidden = false;
   };
-  next.dataset.src = art(album, SIZE.mid);
+  next.dataset.src = album.local || art(album, SIZE.mid);   /* 收藏过的用本地缓存，离线也能看 */
   next.src = next.dataset.src;
   next.alt = `${album.title} — ${album.artist}`;
 
@@ -685,7 +829,9 @@ function paint(album){
     countEl.title = "";
   } else {
     countEl.textContent = `${pos + 1}/${queue.length}`;
-    countEl.title = `第 ${pos + 1} 张 · 共 ${queue.length} 张`;
+    countEl.title = source === "fav"
+      ? `收藏 第 ${pos + 1} 张 · 共 ${queue.length} 张`
+      : `第 ${pos + 1} 张 · 共 ${queue.length} 张`;
   }
   document.getElementById("badge").hidden = !album._anniv;
   document.title = `${album.artist} — ${album.title}`;
@@ -758,7 +904,7 @@ function show(album, { isGuest = false } = {}){
   guest = isGuest;
   paint(album);
   /* 记住今天看到第几张，下次打开接着看 */
-  if (!guest) STORE.set("view", { date: dayKey, pos });
+  if (!guest && source === "day") STORE.set("view", { date: dayKey, pos });
   syncMode();
   if (carBlocked()) carStop();    /* 进了挂起状态就停表（什么时候起表由 carSync 决定） */
 }
@@ -776,6 +922,7 @@ function step(d, { auto = false } = {}){
     return;
   }
   pos = (pos + d + queue.length) % queue.length;
+  setPos(pos);
   show(queue[pos]);
   /* 自动轮播换图时不亮任何控件：轮播就该是一张干净的封面
      （手动切才亮出来，让人看到序号和左右箭头） */
@@ -784,8 +931,10 @@ function step(d, { auto = false } = {}){
 
 function goToday(){
   dayKey = iso(new Date());
+  source = "day";
   queue = buildQueue(dayKey);
-  guest = false; pos = 0;
+  guest = false;
+  setPos(0);
   carStop(); car.left = -1; carManualHold();
   show(queue[0]);
   flash(true);
@@ -797,7 +946,7 @@ function goToday(){
    guest  = 正在看搜索选来的专辑 → 两个都不高亮，左右箭头禁用
    （搜索选来的专辑不在今日队列里，没有"上一张/下一张"这回事） */
 function syncMode(){
-  mode = searchOpen ? "search" : guest ? "guest" : "day";
+  mode = searchOpen ? "search" : guest ? "guest" : source === "fav" ? "fav" : "day";
   if (mode !== "guest") win.classList.remove("tb-late");
   setTabs();
 }
@@ -834,6 +983,7 @@ function setFlip(v){
   flipped = v;
   win.classList.toggle("flipped", v);
   if (v) document.getElementById("b-tracks").scrollTop = 0;
+  hideHeart();                   /* 翻面时把心形收掉，别悬在曲目表上 */
   carSync();                     /* 翻到背面 = 挂起轮播；翻回来再继续 */
 }
 
@@ -1017,7 +1167,7 @@ function closeSearch(){
 }
 
 function setTabs(){
-  const activeId = mode === "day" ? "tab-day" : mode === "search" ? "tab-search" : null;
+  const activeId = { day: "tab-day", fav: "tab-fav", search: "tab-search" }[mode] || null;
   document.querySelectorAll(".topbar button").forEach((b) =>
     b.setAttribute("aria-selected", String(b.id === activeId)));
   win.classList.toggle("mode-guest", mode === "guest");
@@ -1130,6 +1280,11 @@ function flash(reset = true){
 }
 win.addEventListener("pointermove", () => {
   win.classList.remove("tb-late");          /* 鼠标一动，刚收起的顶栏就回来 */
+  /* 心形还在的话，鼠标动一动就给它续命（停住不动的才算"不用了"） */
+  if (document.getElementById("heart").classList.contains("show")){
+    clearTimeout(heartTimer);
+    heartTimer = setTimeout(hideHeart, HEART_IDLE);
+  }
   if (!searchOpen && !flipped) flash();
 });
 win.addEventListener("pointerleave", () => { win.classList.remove("hud-on"); });
@@ -1149,10 +1304,16 @@ document.getElementById("to-back").addEventListener("click", (e) => { e.stopProp
 document.getElementById("to-front").addEventListener("click", () => setFlip(false));
 document.getElementById("tab-day").addEventListener("click", (e) => {
   e.stopPropagation();
-  if (guest){ guest = false; show(queue[pos]); }   /* 从搜索选来的专辑回到今日这一屏 */
   closeSearch();                                   /* 顺手把搜索浮层收掉 */
+  if (guest){ guest = false; show(queue[pos]); }   /* 从搜索选来的专辑回到当前这一屏 */
+  switchSource("day");                             /* 切回今日这一屏 */
   carManualHold();                                 /* 回到这一屏也算手动，先多留一会儿 */
   flash(false);
+});
+document.getElementById("tab-fav").addEventListener("click", (e) => {
+  e.stopPropagation();
+  closeSearch();
+  switchSource("fav");
 });
 document.getElementById("tab-search").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -1163,6 +1324,24 @@ document.querySelector(".front").addEventListener("dblclick", (e) => {
   setFlip(!flipped);
 });
 win.addEventListener("click", () => { if (!flipped && !searchOpen) flash(); });
+
+/* 右键：在鼠标处弹出收藏心形（主窗口里右键菜单已被禁用，这里就是它的替代） */
+win.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  if (searchOpen) return;
+  showHeartAt(e.clientX, e.clientY);
+  flash(false);                       /* 右键是主动操作，顺手把控件亮出来 */
+});
+document.getElementById("heart").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleFavorite();
+});
+/* 鼠标停在心里上就不自动收走，方便连着点 */
+document.getElementById("heart").addEventListener("pointerenter", () => clearTimeout(heartTimer));
+document.getElementById("heart").addEventListener("pointerleave", () => {
+  clearTimeout(heartTimer);
+  heartTimer = setTimeout(hideHeart, 1200);
+});
 
 let wheelLock = 0;
 win.addEventListener("wheel", (e) => {
@@ -1208,7 +1387,7 @@ addEventListener("keydown", (e) => {
   /* 浏览器里打开原型时，这些能力都不存在：把 ✕ 拿掉，其余逻辑跳过 */
   if (!T){ closeBtn.remove(); return; }
   /* 不同版本暴露的位置不太一样，兜一下 */
-  const invoke = (T.core && T.core.invoke) || T.invoke
+  invoke = (T.core && T.core.invoke) || T.invoke
     || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
   if (typeof invoke !== "function"){ closeBtn.remove(); return; }
 
@@ -1217,6 +1396,12 @@ addEventListener("keydown", (e) => {
 
   /* 轮播档位由托盘菜单决定：启动问一次，之后听事件（改完立刻生效，不用重启） */
   invoke("get_carousel").then((v) => { carSec = Number(v) || 0; carSync(); }).catch(() => {});
+
+  /* 收藏：先拿本地封面目录，再读收藏列表（顺序别反，favToAlbum 要用到目录） */
+  invoke("covers_dir_path")
+    .then((dir) => { coversBase = dir || ""; return invoke("list_favorites"); })
+    .then((list) => { applyFavList(list); if (source === "fav") rebuildFavQueue(); })
+    .catch(() => {});
   if (T.event && T.event.listen){
     T.event.listen("carousel-changed", (e) => {
       carSec = Number(e.payload) || 0;
@@ -1273,7 +1458,7 @@ function refreshDay(){
   const k = iso(new Date());
   if (k === dayKey) return;
   dayKey = k; queue = buildQueue(dayKey);
-  if (!guest){ pos = 0; show(queue[0]); }
+  if (source === "day" && !guest){ setPos(0); show(queue[0]); }
 }
 document.addEventListener("visibilitychange", () => {
   winVisible = !document.hidden;   /* 收进托盘/最小化 → 轮播挂起；回来再继续 */
@@ -1283,7 +1468,7 @@ document.addEventListener("visibilitychange", () => {
 
 (function boot(){
   const saved = STORE.get("view", null);
-  if (saved && saved.date === dayKey && saved.pos < queue.length) pos = saved.pos;
+  if (saved && saved.date === dayKey && saved.pos < queue.length) setPos(saved.pos);
   setTabs();
   show(queue[pos]);
 

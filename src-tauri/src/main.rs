@@ -5,6 +5,8 @@
 // 关闭：右上角的 ✕、Alt+F4 都只是收起到托盘，真正退出走托盘菜单的「退出」。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod favorites;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -304,7 +306,11 @@ fn main() {
             hide_to_tray,
             start_drag,
             open_external,
-            get_carousel
+            get_carousel,
+            favorites::list_favorites,
+            favorites::covers_dir_path,
+            favorites::add_favorite,
+            favorites::remove_favorite
         ])
         // Alt+F4 / 关闭请求：收起到托盘，不退出
         .on_window_event(|window, event| {
