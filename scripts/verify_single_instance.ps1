@@ -1,8 +1,17 @@
+param([switch]$Kill)
+
 # 验证单实例：连开两个进程，第二个应当立刻退出，第一个继续运行
 $exe = "C:\Myfiles\repo\nbs\CoverArt\src-tauri\target\release\coverart.exe"
 
-Get-Process coverart -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
+$running = @(Get-Process coverart -ErrorAction SilentlyContinue)
+if ($running.Count -gt 0) {
+  if (-not $Kill) {
+    Write-Output ("已有 CoverArt 在运行（PID " + (($running | ForEach-Object { $_.Id }) -join ", ") + "）。这项测试必须先清场，要跑请加 -Kill（会关掉现有实例）。")
+    return
+  }
+  $running | Stop-Process -Force
+  Start-Sleep -Seconds 1
+}
 Write-Output ("清场后残留进程: " + @(Get-Process coverart -ErrorAction SilentlyContinue).Count)
 
 Write-Output "启动第 1 个实例…"

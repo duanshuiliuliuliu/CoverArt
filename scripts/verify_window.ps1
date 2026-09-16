@@ -1,7 +1,7 @@
 # 启动构建出来的 CoverArt.exe，核对：
 #   1) 窗口尺寸/不可缩放/无标题栏   2) 托盘图标是否创建   3) 内容是否真的渲染出来
 # 可选：-Scale 125 先写入 prefs.json 再启动，验证缩放档位
-param([int]$Scale = 0, [switch]$Keep)
+param([int]$Scale = 0, [switch]$Keep, [switch]$Kill)
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -43,6 +43,17 @@ public class W {
 $root = "C:\Myfiles\repo\nbs\CoverArt"
 $exe = Join-Path $root "src-tauri\target\release\coverart.exe"
 $prefs = Join-Path $env:APPDATA "com.coverart.desktop\prefs.json"
+
+# 单实例机制下，已有实例在跑时新进程会直接退出——默认不去动别人的进程
+$running = @(Get-Process coverart -ErrorAction SilentlyContinue)
+if ($running.Count -gt 0) {
+  if (-not $Kill) {
+    Write-Output ("已有 CoverArt 在运行（PID " + (($running | ForEach-Object { $_.Id }) -join ", ") + "），单实例下新进程会直接退出，本次跳过。要强制验证请加 -Kill。")
+    return
+  }
+  $running | Stop-Process -Force
+  Start-Sleep -Seconds 1
+}
 
 if ($Scale -gt 0) {
   New-Item -ItemType Directory -Force -Path (Split-Path $prefs) | Out-Null

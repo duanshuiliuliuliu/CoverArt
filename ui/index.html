@@ -45,6 +45,9 @@
   #win.flipped #flip{transform:rotateY(180deg)}
   .face{position:absolute; inset:0; backface-visibility:hidden; -webkit-backface-visibility:hidden; overflow:hidden}
   .back{transform:rotateY(180deg)}
+  /* 转到背面的那一面不参与点击：否则正面右上角的 ✕ 会正好压在背面左上角的返回箭头上
+     （backface-visibility:hidden 只是不画它，仍然能被点到） */
+  #win.flipped .front, #win:not(.flipped) .back{pointer-events:none}
 
   /* ---------- 封面 ---------- */
   .art{position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
@@ -1102,6 +1105,17 @@ addEventListener("keydown", (e) => {
 
   /* 4. 右上角 ✕ → 收起到托盘（不退出） */
   closeBtn.addEventListener("click", (e) => { e.stopPropagation(); invoke("hide_to_tray"); });
+
+  /* 背面的两个外链：交给系统默认浏览器打开，而不是在窗口里开新页面 */
+  ["b-apple", "b-hires"].forEach((id) => {
+    const link = document.getElementById(id);
+    if (!link) return;
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      invoke("open_external", { url: link.href });
+    });
+  });
 
   /* 3. 整窗可拖：按住任意空白处移动超过 4px 才交给系统拖窗口，
         于是「点一下」仍然是点击/双击，不会被拖动吃掉 */

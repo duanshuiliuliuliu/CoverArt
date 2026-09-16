@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
 
 /// 100% 时的窗口边长（逻辑像素）。界面按同比例 zoom，所以 CSS 视口始终是 560。
@@ -97,6 +97,13 @@ fn start_drag(window: WebviewWindow) {
     let _ = window.start_dragging();
 }
 
+/// 用系统默认浏览器打开外链（背面的 Apple Music / 原图 3000）
+#[tauri::command]
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 fn build_tray(app: &AppHandle, current_scale: u32) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "隐藏", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -141,11 +148,16 @@ fn build_tray(app: &AppHandle, current_scale: u32) -> tauri::Result<()> {
                 _ => {}
             }
         })
+        // 托盘图标：左键双击才显示窗口（单击不做任何事，避免误触）
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button, button_state, .. } = event {
-                if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                    toggle_window(tray.app_handle());
+            if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
+                let app = tray.app_handle();
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
                 }
+                sync_toggle_label(app);
             }
         })
         .build(app)?;
@@ -164,12 +176,13 @@ fn main() {
             }
             sync_toggle_label(app);
         }))
+        .plugin(tauri_plugin_opener::init())
         .manage(Prefs {
             scale: Mutex::new(100),
             checks: Mutex::new(Vec::new()),
             toggle: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![hide_to_tray, start_drag])
+        .invoke_handler(tauri::generate_handler![hide_to_tray, start_drag, open_external])
         // Alt+F4 / 关闭请求：收起到托盘，不退出
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
