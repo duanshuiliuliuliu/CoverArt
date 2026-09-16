@@ -73,10 +73,12 @@ if ($h -ne [IntPtr]::Zero) {
   $dwm = New-Object W+RECT
   $dwmOk = [W]::DwmGetWindowAttribute($h, 9, [ref]$dwm, 16)
   $style = [W]::GetWindowLong($h, -16)
+  $exstyle = [W]::GetWindowLong($h, -20)
   $dpi = [W]::GetDpiForWindow($h)
   Write-Output ("客户区: " + ($cr.Right - $cr.Left) + "x" + ($cr.Bottom - $cr.Top) + "   外框: " + ($wr.Right - $wr.Left) + "x" + ($wr.Bottom - $wr.Top) + "   DPI: " + $dpi)
   if ($dwmOk -eq 0) { Write-Output ("DWM 可见边框: " + ($dwm.Right - $dwm.Left) + "x" + ($dwm.Bottom - $dwm.Top)) }
   Write-Output ("可拖边缩放(WS_THICKFRAME): " + [bool]($style -band 0x00040000) + "   可最大化(WS_MAXIMIZEBOX): " + [bool]($style -band 0x00010000))
+  Write-Output ("置顶(WS_EX_TOPMOST): " + [bool]($exstyle -band 0x00000008))
 
   # 托盘图标：tray-icon crate 会建一个隐藏的消息窗口
   $classes = [W]::ClassesOf([uint32]$p.Id)

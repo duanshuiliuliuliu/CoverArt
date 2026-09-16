@@ -20,26 +20,44 @@ const SCALES: [u32; 5] = [50, 75, 100, 125, 150];
 
 struct Prefs {
     scale: Mutex<u32>,
+    ontop: Mutex<bool>,
     checks: Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>,
     toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
+    ontop_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
 fn prefs_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("prefs.json"))
 }
 
-fn load_scale(app: &AppHandle) -> u32 {
-    let Some(path) = prefs_file(app) else { return 100 };
-    let Ok(text) = fs::read_to_string(path) else { return 100 };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return 100 };
+/// 读偏好：(缩放档位, 是否置顶)
+fn load_prefs(app: &AppHandle) -> (u32, bool) {
+    let Some(path) = prefs_file(app) else { return (100, false) };
+    let Ok(text) = fs::read_to_string(path) else { return (100, false) };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false) };
     let scale = json.get("scale").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
-    if SCALES.contains(&scale) { scale } else { 100 }
+    let scale = if SCALES.contains(&scale) { scale } else { 100 };
+    let ontop = json.get("alwaysOnTop").and_then(|v| v.as_bool()).unwrap_or(false);
+    (scale, ontop)
 }
 
-fn save_scale(app: &AppHandle, scale: u32) {
+/// 两个偏好一起写盘（改任意一个都重写整份，字段少、不折腾）
+fn save_prefs(app: &AppHandle) {
+    let state = app.try_state::<Prefs>();
+    let scale = state
+        .as_ref()
+        .and_then(|s| s.scale.lock().ok().map(|v| *v))
+        .unwrap_or(100);
+    let ontop = state
+        .as_ref()
+        .and_then(|s| s.ontop.lock().ok().map(|v| *v))
+        .unwrap_or(false);
     let Some(path) = prefs_file(app) else { return };
     if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
-    let _ = fs::write(path, format!("{{\n  \"scale\": {scale}\n}}\n"));
+    let _ = fs::write(
+        path,
+        format!("{{\n  \"scale\": {scale},\n  \"alwaysOnTop\": {ontop}\n}}\n"),
+    );
 }
 
 /// 缩放 = 窗口尺寸等比变化 + 界面 zoom 同比例变化，
@@ -56,7 +74,21 @@ fn apply_scale(app: &AppHandle, scale: u32) {
         }
         if let Ok(mut current) = state.scale.lock() { *current = scale; }
     }
-    save_scale(app, scale);
+    save_prefs(app);
+}
+
+/// 置顶：窗口层级 + 托盘菜单里的勾 + 记盘
+fn set_ontop(app: &AppHandle, on: bool) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_always_on_top(on);
+    }
+    if let Some(state) = app.try_state::<Prefs>() {
+        if let Ok(mut current) = state.ontop.lock() { *current = on; }
+        if let Ok(item) = state.ontop_item.lock() {
+            if let Some(item) = item.as_ref() { let _ = item.set_checked(on); }
+        }
+    }
+    save_prefs(app);
 }
 
 fn sync_toggle_label(app: &AppHandle) {
@@ -104,8 +136,9 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
-fn build_tray(app: &AppHandle, current_scale: u32) -> tauri::Result<()> {
+fn build_tray(app: &AppHandle, current_scale: u32, current_ontop: bool) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "隐藏", true, None::<&str>)?;
+    let ontop = CheckMenuItem::with_id(app, "ontop", "置顶", true, current_ontop, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 
@@ -124,10 +157,11 @@ fn build_tray(app: &AppHandle, current_scale: u32) -> tauri::Result<()> {
     let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
         checks.iter().map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
     let scale_menu = Submenu::with_items(app, "缩放", true, &refs)?;
-    let menu = Menu::with_items(app, &[&toggle, &scale_menu, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &ontop, &scale_menu, &separator, &quit])?;
 
     if let Some(state) = app.try_state::<Prefs>() {
         if let Ok(mut guard) = state.toggle.lock() { *guard = Some(toggle); }
+        if let Ok(mut guard) = state.ontop_item.lock() { *guard = Some(ontop); }
         if let Ok(mut guard) = state.checks.lock() { *guard = checks; }
     }
 
@@ -144,6 +178,13 @@ fn build_tray(app: &AppHandle, current_scale: u32) -> tauri::Result<()> {
             }
             match id {
                 "toggle" => toggle_window(app),
+                "ontop" => {
+                    let now = app
+                        .try_state::<Prefs>()
+                        .and_then(|s| s.ontop.lock().ok().map(|v| *v))
+                        .unwrap_or(false);
+                    set_ontop(app, !now);
+                }
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -179,8 +220,10 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(Prefs {
             scale: Mutex::new(100),
+            ontop: Mutex::new(false),
             checks: Mutex::new(Vec::new()),
             toggle: Mutex::new(None),
+            ontop_item: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![hide_to_tray, start_drag, open_external])
         // Alt+F4 / 关闭请求：收起到托盘，不退出
@@ -193,9 +236,10 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            let scale = load_scale(&handle);
-            build_tray(&handle, scale)?;
+            let (scale, ontop) = load_prefs(&handle);
+            build_tray(&handle, scale, ontop)?;
             apply_scale(&handle, scale);
+            set_ontop(&handle, ontop);          /* 恢复上次的置顶状态 */
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
