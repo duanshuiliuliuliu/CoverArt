@@ -40,6 +40,8 @@ fn prefs_file(app: &AppHandle) -> Option<PathBuf> {
 fn load_prefs(app: &AppHandle) -> (u32, bool, u32) {
     let Some(path) = prefs_file(app) else { return (100, false, 8) };
     let Ok(text) = fs::read_to_string(path) else { return (100, false, 8) };
+    /* 有人用记事本改过就会有 BOM，先剥掉再解析，免得悄悄回退成默认值 */
+    let text = text.trim_start_matches('\u{feff}');
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false, 8) };
     let scale = json.get("scale").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
     let scale = if SCALES.contains(&scale) { scale } else { 100 };

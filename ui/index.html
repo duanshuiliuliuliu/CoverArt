@@ -671,6 +671,7 @@ function favToAlbum(f){
     id: f.id, sf: f.sf, title: f.title, artist: f.artist,
     date: f.date || "", genre: f.genre || "", tracks: f.tracks || 0, art: f.art,
     local: f.cover && coversBase ? localUrl(coversBase + "/" + f.cover) : "",
+    track_list: Array.isArray(f.track_list) ? f.track_list : [],
   };
 }
 function applyFavList(list){
@@ -726,9 +727,7 @@ async function toggleFavorite(){
   }
   h.classList.add("pop");
   setTimeout(() => h.classList.remove("pop"), 320);
-  /* 点完先别急着收：留一会儿，方便"再点一下取消收藏" */
-  clearTimeout(heartTimer);
-  heartTimer = setTimeout(hideHeart, HEART_IDLE);
+  hideHeart();                    /* 点完立刻收走，不赖在封面上 */
   /* 正在收藏视图里取消了当前这张：从队列里挪走 */
   if (source === "fav") rebuildFavQueue();
 }
@@ -994,6 +993,11 @@ const trackMemo = new Map();
 async function loadTracks(album){
   const el = document.getElementById("b-tracks");
   const k = key(album);
+  /* 收藏时曲目表已经随收藏一起缓存下来了：直接用，断网也能翻背面 */
+  if (Array.isArray(album.track_list) && album.track_list.length){
+    trackMemo.set(k, album.track_list);
+    return renderTracks(el, album.track_list);
+  }
   if (trackMemo.has(k)) return renderTracks(el, trackMemo.get(k));
   const cached = STORE.get("tracks." + k, null);
   if (cached && Date.now() - cached.t < TRACK_TTL){

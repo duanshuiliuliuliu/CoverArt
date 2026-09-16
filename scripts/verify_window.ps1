@@ -1,4 +1,4 @@
-# 启动构建出来的 CoverArt.exe，核对：
+﻿# 启动构建出来的 CoverArt.exe，核对：
 #   1) 窗口尺寸/不可缩放/无标题栏   2) 托盘图标是否创建   3) 内容是否真的渲染出来
 # 可选：-Scale 125 先写入 prefs.json 再启动，验证缩放档位
 param([int]$Scale = 0, [switch]$Keep, [switch]$Kill)

@@ -1,4 +1,4 @@
-# 收藏功能端到端：真启动 exe，用 SendInput 右键 → 点心形 → 看文件系统
+﻿# 收藏功能端到端：真启动 exe，用 SendInput 右键 → 点心形 → 看文件系统
 #   1) 右键：心形应当出现在鼠标处
 #   2) 点一下：收藏 → favorites.json 多一条 + covers\<id>.jpg 落盘
 #   3) 再点一下：取消收藏 → 索引还原 + 本地图片被删掉（按需求第 5 条）
@@ -90,6 +90,17 @@ Write-Output ("右键后：心形应当出现在鼠标处（" + $cx + "," + $cy 
 Start-Sleep -Seconds 3              # 等下载封面 + 写索引
 $after1 = State
 Write-Output ("点一下之后：" + ($after1 | ConvertTo-Json -Compress) + "   ← 期望：条数/图片数比测试前多 1")
+
+# 曲目表也要一起缓存进索引（收藏后断网也能翻背面）
+$trackInfo = "（没读到索引）"
+if (Test-Path $index) {
+  $items = @((Get-Content $index -Raw -Encoding UTF8 | ConvertFrom-Json).items)
+  if ($items.Count -gt 0) {
+    $newest = $items[-1]
+    $trackInfo = "最新一条：《" + $newest.title + "》缓存曲目 " + @($newest.track_list).Count + " 首"
+  }
+}
+Write-Output ("曲目缓存：" + $trackInfo + "   ← 期望：和这张专辑的曲目数一致（不是 0）")
 
 # 第二次点击要趁心形还在（它是"静置 2.6 秒"才收走）；
 # 下载封面可能占用几秒，所以先等索引写出来，再在心形还在时补一次右键、然后点击。

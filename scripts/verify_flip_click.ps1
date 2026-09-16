@@ -1,4 +1,4 @@
-param([switch]$Kill)
+﻿param([switch]$Kill)
 
 # 复现并验证「翻面后点返回箭头，窗口被关掉」这个 bug：
 #   1) 截图 A（正面）  2) 按空格翻到背面 → 截图 B

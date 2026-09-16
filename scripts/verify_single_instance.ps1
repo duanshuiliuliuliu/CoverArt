@@ -1,4 +1,4 @@
-param([switch]$Kill)
+﻿param([switch]$Kill)
 
 # 验证单实例：连开两个进程，第二个应当立刻退出，第一个继续运行
 $exe = "C:\Myfiles\repo\nbs\CoverArt\src-tauri\target\release\coverart.exe"

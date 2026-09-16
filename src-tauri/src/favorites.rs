@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub n: u32,
+    pub name: String,
+    #[serde(default)]
+    pub ms: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Favorite {
     pub id: String,
     pub sf: String,
@@ -30,6 +38,9 @@ pub struct Favorite {
     /// 本地封面文件名（covers/<id>.jpg）；下载失败时为空字符串
     #[serde(default)]
     pub cover: String,
+    /// 曲目表也一起缓存，收藏的专辑断网也能翻背面
+    #[serde(default)]
+    pub track_list: Vec<Track>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -60,6 +71,7 @@ fn now() -> u64 {
 pub fn load(app: &AppHandle) -> Vec<Favorite> {
     let Some(path) = index_path(app) else { return Vec::new() };
     let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
+    let text = text.trim_start_matches('\u{feff}');
     serde_json::from_str::<Index>(&text).map(|i| i.items).unwrap_or_default()
 }
 
@@ -90,6 +102,32 @@ async fn download_cover(item: &Favorite, dir: &PathBuf) -> Result<String, String
     Ok(name)
 }
 
+/// 抓一次曲目表存进索引（失败就算了，界面会回退到联网取）
+async fn fetch_tracks(item: &Favorite) -> Vec<Track> {
+    let url = format!(
+        "https://itunes.apple.com/lookup?id={}&entity=song&country={}&limit=200",
+        item.id, item.sf
+    );
+    let Ok(res) = reqwest::get(&url).await else { return Vec::new() };
+    if !res.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(json) = res.json::<serde_json::Value>().await else { return Vec::new() };
+    json.get("results")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r.get("wrapperType").and_then(|w| w.as_str()) == Some("track"))
+                .map(|r| Track {
+                    n: r.get("trackNumber").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    name: r.get("trackName").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    ms: r.get("trackTimeMillis").and_then(|v| v.as_u64()).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn list_favorites(app: AppHandle) -> Vec<Favorite> {
     load(&app)
@@ -114,6 +152,7 @@ pub async fn add_favorite(app: AppHandle, album: Favorite) -> Result<Vec<Favorit
             item.cover = name;
         }
     }
+    item.track_list = fetch_tracks(&item).await;
     items.push(item);
     save(&app, &items)?;
     Ok(items)
