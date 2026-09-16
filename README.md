@@ -2,7 +2,7 @@
 
 一个 Windows 桌面小窗口：**打开就是一张专辑封面，窗口和封面一样大**。
 
-当前状态：原型（`coverart-mini.html`，浏览器里双击就能看）+ 已经能跑的 Windows 程序（Tauri 2 + WebView2）。
+当前状态：能跑的 Windows 程序（Tauri 2 + WebView2）；想先在浏览器里看效果就双击 `coverart-mini.html`（它就是个外壳，里面装的是程序同一份 `ui/index.html`）。
 
 ## 运行与打包
 
@@ -28,7 +28,7 @@ CoverArt/
 │  ├─ gen_icon.mjs            纯 Node 画图标源图（深色圆角块 + 唱片环）
 │  ├─ verify_window.ps1       启动 exe，核对窗口尺寸/不可缩放/托盘/内容是否渲染
 │  └─ verify_single_instance.ps1  连开两个实例，核对单实例是否生效
-└─ coverart-mini.html         浏览器原型（保留，用来快速试视觉）
+└─ coverart-mini.html         浏览器预览外壳：方形区域里直接装 ui/index.html，永远不会和程序走样
 ```
 
 ## 窗口规格（`src-tauri/tauri.conf.json`）
