@@ -12,6 +12,7 @@
 npm install          # 只装 Tauri CLI，界面本身零依赖、没有打包步骤
 npm run dev          # 开发模式：改 ui/index.html 直接生效、热重载
 npm run build:exe    # 只出 exe：src-tauri/target/release/coverart.exe
+npm run rebuild      # 同上，但先关掉正在托盘里跑的实例（它锁着 exe，否则构建会报 Access is denied）
 npm run build        # 出 NSIS 安装包：src-tauri/target/release/bundle/nsis/
 ```
 
@@ -72,6 +73,8 @@ npm run icon                # 生成 src-tauri/icons/ 全套（含 icon.ico）
 - 静止时只剩封面；鼠标靠近才出现控件，停下 2.6 秒又收走
 - ← → 换封面 ｜ 双击 / 空格翻面看曲目 ｜ 打字或 ⌘K 搜索 ｜ T 回到今天
 - 每天一屏 20 张，按日期种子轮换；左上角「发行纪念日」角标在专辑发行当天出现
+- 换封面时如果新图还没到（超过 120ms），先把当前这张磨成**毛玻璃**（模糊 + 压暗 + 轻微放大 + 一层暗罩）再切过去，
+  而不是一直清清楚楚地留着上一张——快速连点「下一张」或选中搜索结果时尤其明显；命中缓存/预加载时不闪
 - 右下角：`3/20` 序号胶囊 + 详情 + 下载原图（⬇ 存到本地，背面「看原图 ↗」是在浏览器里打开同一张 3000×3000）
 - 背面的两个外链交给**系统默认浏览器**打开（Rust 的 `open_external` → `tauri-plugin-opener`）：`Apple Music ↗` 打开专辑页，`看原图 ↗` 打开 3000×3000 原图
 - 选中搜索结果后进入「浏览结果」：左右箭头在这串搜索结果里翻（序号显示 `3/22`），顶栏先收起、鼠标一动再回来（两个标签都不高亮）；点顶栏「每日」或按 T 回到今日这一屏

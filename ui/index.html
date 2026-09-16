@@ -51,8 +51,18 @@
 
   /* ---------- 封面 ---------- */
   .art{position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
-       opacity:0; transition:opacity .42s var(--ease)}
+       opacity:0;
+       transition:opacity .42s var(--ease), filter .22s var(--ease), transform .22s var(--ease)}
   .art.in{opacity:1}
+  /* 图还没到：把正在显示的那张磨成一团玻璃（模糊 + 压暗 + 轻微放大），
+     而不是继续清清楚楚地留着上一张——快速连点「下一张」时尤其明显 */
+  .art.blurred{filter:blur(26px) brightness(.6) saturate(1.05); transform:scale(1.07)}
+  .frost{
+    position:absolute; inset:0; pointer-events:none; opacity:0;
+    background:rgba(10,10,12,.34);
+    transition:opacity .2s var(--ease);
+  }
+  #win.loading .frost{opacity:1}
 
   /* ---------- 悬停层（静止时完全消失） ---------- */
   .veil{
@@ -379,6 +389,7 @@
     <div class="face front">
       <img class="art" id="artA" alt="" draggable="false" crossorigin="anonymous">
       <img class="art" id="artB" alt="" draggable="false" crossorigin="anonymous">
+      <div class="frost"></div>
       <div class="veil"></div>
       <div class="badge" id="badge" hidden>发行纪念日</div>
 
@@ -574,12 +585,27 @@ let layerTop = 1;
 function paint(album){
   const next = layers[1 - layerTop];
   const cur = layers[layerTop];
+  /* 图没在缓存里就得等网络：等超过 120ms 还没到，就先把当前这张磨成毛玻璃，
+     换图完成后再撤掉（缓存命中时几十毫秒就回来了，不会闪一下） */
+  let settled = false;
+  const frostTimer = setTimeout(() => {
+    if (settled) return;
+    win.classList.add("loading");
+    cur.classList.add("blurred");
+  }, 120);
+  const settle = () => {
+    settled = true;
+    clearTimeout(frostTimer);
+    win.classList.remove("loading");
+    setTimeout(() => cur.classList.remove("blurred"), 460);   /* 等它淡出完再还原 */
+  };
   next.onload = () => {
     next.classList.add("in");
     setTimeout(() => cur.classList.remove("in"), 260);
     layerTop = 1 - layerTop;
     document.getElementById("boot").classList.add("off");
     errBox.hidden = true;
+    settle();
     adaptChrome(next);                        /* 顶栏颜色跟着这张封面的亮度走 */
   };
   next.onerror = () => {
@@ -589,6 +615,7 @@ function paint(album){
       next.src = next.dataset.src;
       return;
     }
+    settle();
     errText.textContent = "封面加载失败，可能是网络问题或 Apple 图床被限流。";
     errBox.hidden = false;
   };
