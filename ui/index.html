@@ -403,7 +403,7 @@
     content:""; position:absolute; inset:0; border-radius:50%; pointer-events:none;
     box-shadow:0 0 0 2px currentColor; opacity:0;
   }
-  .heart.pop::after{animation:heart-ring .46s var(--ease) forwards}
+  .heart.pop::after{animation:heart-ring .38s var(--ease) forwards}
   @keyframes heart-ring{
     from{transform:scale(1); opacity:.6}
     to{transform:scale(1.75); opacity:0}
@@ -703,7 +703,7 @@ function updateHeart(){
 }
 let heartTimer;
 const HEART_IDLE = 2600;          /* 没点它：静置多久后收走 */
-const HEART_AFTER_CLICK = 850;    /* 点完：留这么久让你看清"变红/变空心"，然后干脆地走 */
+const HEART_AFTER_CLICK = 400;    /* 点完：只看清"变红/变空心"就走，不磨蹭 */
 function hideHeart(){
   clearTimeout(heartTimer);
   document.getElementById("heart").classList.remove("show");
