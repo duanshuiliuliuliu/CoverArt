@@ -11,17 +11,21 @@ use std::sync::Mutex;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewWindow};
 
 /// 100% 时的窗口边长（逻辑像素）。界面按同比例 zoom，所以 CSS 视口始终是 560。
 const BASE: f64 = 560.0;
 /// 托盘里可选的缩放档位
 const SCALES: [u32; 5] = [50, 75, 100, 125, 150];
+/// 托盘里可选的轮播档位（秒），0 = 关闭
+const CAROUSELS: [u32; 5] = [0, 5, 8, 12, 20];
 
 struct Prefs {
     scale: Mutex<u32>,
     ontop: Mutex<bool>,
+    carousel: Mutex<u32>,
     checks: Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>,
+    car_checks: Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>,
     toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
     ontop_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
@@ -30,15 +34,17 @@ fn prefs_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("prefs.json"))
 }
 
-/// 读偏好：(缩放档位, 是否置顶)
-fn load_prefs(app: &AppHandle) -> (u32, bool) {
-    let Some(path) = prefs_file(app) else { return (100, false) };
-    let Ok(text) = fs::read_to_string(path) else { return (100, false) };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false) };
+/// 读偏好：(缩放档位, 是否置顶, 轮播秒数)
+fn load_prefs(app: &AppHandle) -> (u32, bool, u32) {
+    let Some(path) = prefs_file(app) else { return (100, false, 8) };
+    let Ok(text) = fs::read_to_string(path) else { return (100, false, 8) };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false, 8) };
     let scale = json.get("scale").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
     let scale = if SCALES.contains(&scale) { scale } else { 100 };
     let ontop = json.get("alwaysOnTop").and_then(|v| v.as_bool()).unwrap_or(false);
-    (scale, ontop)
+    let carousel = json.get("carousel").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
+    let carousel = if CAROUSELS.contains(&carousel) { carousel } else { 8 };
+    (scale, ontop, carousel)
 }
 
 /// 两个偏好一起写盘（改任意一个都重写整份，字段少、不折腾）
@@ -52,12 +58,43 @@ fn save_prefs(app: &AppHandle) {
         .as_ref()
         .and_then(|s| s.ontop.lock().ok().map(|v| *v))
         .unwrap_or(false);
+    let carousel = state
+        .as_ref()
+        .and_then(|s| s.carousel.lock().ok().map(|v| *v))
+        .unwrap_or(8);
     let Some(path) = prefs_file(app) else { return };
     if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
     let _ = fs::write(
         path,
-        format!("{{\n  \"scale\": {scale},\n  \"alwaysOnTop\": {ontop}\n}}\n"),
+        format!(
+            "{{\n  \"scale\": {scale},\n  \"alwaysOnTop\": {ontop},\n  \"carousel\": {carousel}\n}}\n"
+        ),
     );
+}
+
+/// 轮播秒数：托盘勾选 + 写盘 + 通知界面立刻生效（0 = 关闭）
+fn set_carousel(app: &AppHandle, seconds: u32) {
+    if let Some(state) = app.try_state::<Prefs>() {
+        if let Ok(mut current) = state.carousel.lock() { *current = seconds; }
+        if let Ok(items) = state.car_checks.lock() {
+            for (value, item) in items.iter() { let _ = item.set_checked(*value == seconds); }
+        }
+    }
+    save_prefs(app);
+    let _ = app.emit("carousel-changed", seconds);
+}
+
+/// 窗口显示/隐藏：界面里的轮播据此挂起与恢复
+fn notify_visibility(app: &AppHandle, visible: bool) {
+    let _ = app.emit("window-visible", visible);
+}
+
+/// 界面启动后问一次当前轮播秒数
+#[tauri::command]
+fn get_carousel(app: AppHandle) -> u32 {
+    app.try_state::<Prefs>()
+        .and_then(|s| s.carousel.lock().ok().map(|v| *v))
+        .unwrap_or(8)
 }
 
 /// 缩放 = 窗口尺寸等比变化 + 界面 zoom 同比例变化，
@@ -109,9 +146,11 @@ fn toggle_window(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     if win.is_visible().unwrap_or(false) {
         let _ = win.hide();
+        notify_visibility(app, false);
     } else {
         let _ = win.show();
         let _ = win.set_focus();
+        notify_visibility(app, true);
     }
     sync_toggle_label(app);
 }
@@ -120,6 +159,7 @@ fn toggle_window(app: &AppHandle) {
 #[tauri::command]
 fn hide_to_tray(window: WebviewWindow) {
     let _ = window.hide();
+    notify_visibility(window.app_handle(), false);
     sync_toggle_label(window.app_handle());
 }
 
@@ -136,7 +176,12 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
-fn build_tray(app: &AppHandle, current_scale: u32, current_ontop: bool) -> tauri::Result<()> {
+fn build_tray(
+    app: &AppHandle,
+    current_scale: u32,
+    current_ontop: bool,
+    current_carousel: u32,
+) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "隐藏", true, None::<&str>)?;
     let ontop = CheckMenuItem::with_id(app, "ontop", "置顶", true, current_ontop, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -157,12 +202,36 @@ fn build_tray(app: &AppHandle, current_scale: u32, current_ontop: bool) -> tauri
     let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
         checks.iter().map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
     let scale_menu = Submenu::with_items(app, "缩放", true, &refs)?;
-    let menu = Menu::with_items(app, &[&toggle, &ontop, &scale_menu, &separator, &quit])?;
+
+    let mut car_checks = Vec::new();
+    for seconds in CAROUSELS {
+        let label = if seconds == 0 { "关闭".to_string() } else { format!("{seconds} 秒") };
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("car_{seconds}"),
+            label,
+            true,
+            seconds == current_carousel,
+            None::<&str>,
+        )?;
+        car_checks.push((seconds, item));
+    }
+    let car_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = car_checks
+        .iter()
+        .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    let car_menu = Submenu::with_items(app, "轮播", true, &car_refs)?;
+
+    let menu = Menu::with_items(
+        app,
+        &[&toggle, &ontop, &scale_menu, &car_menu, &separator, &quit],
+    )?;
 
     if let Some(state) = app.try_state::<Prefs>() {
         if let Ok(mut guard) = state.toggle.lock() { *guard = Some(toggle); }
         if let Ok(mut guard) = state.ontop_item.lock() { *guard = Some(ontop); }
         if let Ok(mut guard) = state.checks.lock() { *guard = checks; }
+        if let Ok(mut guard) = state.car_checks.lock() { *guard = car_checks; }
     }
 
     TrayIconBuilder::with_id("coverart-tray")
@@ -174,6 +243,10 @@ fn build_tray(app: &AppHandle, current_scale: u32, current_ontop: bool) -> tauri
             let id = event.id.as_ref();
             if let Some(value) = id.strip_prefix("scale_") {
                 if let Ok(scale) = value.parse::<u32>() { apply_scale(app, scale); }
+                return;
+            }
+            if let Some(value) = id.strip_prefix("car_") {
+                if let Ok(seconds) = value.parse::<u32>() { set_carousel(app, seconds); }
                 return;
             }
             match id {
@@ -221,29 +294,39 @@ fn main() {
         .manage(Prefs {
             scale: Mutex::new(100),
             ontop: Mutex::new(false),
+            carousel: Mutex::new(8),
             checks: Mutex::new(Vec::new()),
+            car_checks: Mutex::new(Vec::new()),
             toggle: Mutex::new(None),
             ontop_item: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![hide_to_tray, start_drag, open_external])
+        .invoke_handler(tauri::generate_handler![
+            hide_to_tray,
+            start_drag,
+            open_external,
+            get_carousel
+        ])
         // Alt+F4 / 关闭请求：收起到托盘，不退出
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                notify_visibility(window.app_handle(), false);
                 sync_toggle_label(window.app_handle());
             }
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            let (scale, ontop) = load_prefs(&handle);
-            build_tray(&handle, scale, ontop)?;
+            let (scale, ontop, carousel) = load_prefs(&handle);
+            build_tray(&handle, scale, ontop, carousel)?;
             apply_scale(&handle, scale);
             set_ontop(&handle, ontop);          /* 恢复上次的置顶状态 */
+            set_carousel(&handle, carousel);    /* 恢复上次的轮播档位（顺便同步勾选） */
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
+            notify_visibility(&handle, true);
             Ok(())
         })
         .run(tauri::generate_context!())

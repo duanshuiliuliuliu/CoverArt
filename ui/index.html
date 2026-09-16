@@ -567,9 +567,57 @@ let guestIndex = 0;     /* 当前看的是这串里的第几个 */
 let flipped = false;
 let searchOpen = false;
 
+/* ---------------- 每日轮播 ----------------
+   三种停留：正常时长 T（托盘菜单可调）、恢复时长（挂起回来接着看，最多 4s）、
+   手动时长 1.5T（用户自己切过的那张多留一会儿）。
+   计时从「这张图真正显示出来」开始，所以网慢不会吃掉观看时间。
+   挂起条件：关掉轮播 / 搜索浮层打开 / 正在看搜索结果 / 翻到背面 / 窗口收进托盘。 */
+const CAR_RESUME_CAP = 4000;
+const CAR_MANUAL_MULT = 1.5;
+let carSec = 8;                 /* 0 = 关闭 */
+let winVisible = !document.hidden;
+const car = { timer: 0, deadline: 0, left: -1, hold: 0 };
+
 const win = document.getElementById("win");
 const errBox = document.getElementById("err");
 const errText = document.getElementById("err-text");
+
+/* ---------------- 轮播的计时器 ---------------- */
+function carMs(){ return carSec * 1000; }
+function carBlocked(){ return carSec <= 0 || searchOpen || guest || flipped || !winVisible; }
+
+/* 停表：把这一张还剩多久记下来（再挂起时接着看） */
+function carStop(){
+  if (!car.timer) return;
+  car.left = Math.max(0, car.deadline - Date.now());
+  clearTimeout(car.timer);
+  car.timer = 0;
+}
+function carRun(ms){
+  clearTimeout(car.timer);
+  car.deadline = Date.now() + ms;
+  car.timer = setTimeout(carTick, ms);
+}
+/* 挂起条件变了 / 新的一张显示出来了，都走这里；重复调用是安全的 */
+function carSync(){
+  if (carBlocked()){ carStop(); return; }
+  if (car.timer) return;
+  let ms;
+  if (car.left >= 0) ms = Math.min(car.left, CAR_RESUME_CAP);   /* 挂起回来：接着看完，但不超上限 */
+  else if (car.hold > 0) ms = car.hold;                         /* 手动切过的那张：多留一会儿 */
+  else ms = carMs();
+  car.left = -1;
+  car.hold = 0;
+  carRun(ms);
+}
+function carTick(){
+  car.timer = 0;
+  car.left = -1;
+  if (carBlocked()) return;
+  step(1, { auto: true });
+}
+/* 用户自己切过之后，这张按 1.5 倍时长算 */
+function carManualHold(){ car.hold = carMs() * CAR_MANUAL_MULT; }
 const STORE = {
   get(k, fallback){
     try { const v = localStorage.getItem("coverart.mini." + k); return v === null ? fallback : JSON.parse(v); }
@@ -607,6 +655,7 @@ function paint(album){
     errBox.hidden = true;
     settle();
     adaptChrome(next);                        /* 顶栏颜色跟着这张封面的亮度走 */
+    carSync();                                /* 这张真正显示出来了，才开始倒数 */
   };
   next.onerror = () => {
     /* 带 CORS 的加载失败时，退化成普通加载再试一次（代价是不能读像素，只能固定深色顶栏） */
@@ -711,9 +760,13 @@ function show(album, { isGuest = false } = {}){
   /* 记住今天看到第几张，下次打开接着看 */
   if (!guest) STORE.set("view", { date: dayKey, pos });
   syncMode();
+  if (carBlocked()) carStop();    /* 进了挂起状态就停表（什么时候起表由 carSync 决定） */
 }
 
-function step(d){
+function step(d, { auto = false } = {}){
+  carStop();                 /* 换封面了，旧的那次倒数作废 */
+  car.left = -1;
+  if (!auto) carManualHold();   /* 手动切换：这张多留一会儿再回到自动轮播 */
   /* 看搜索结果时：左右箭头在「搜索结果的队列」里翻 */
   if (guest){
     if (guestList.length < 2) return;
@@ -731,6 +784,7 @@ function goToday(){
   dayKey = iso(new Date());
   queue = buildQueue(dayKey);
   guest = false; pos = 0;
+  carStop(); car.left = -1; carManualHold();
   show(queue[0]);
   flash(true);
 }
@@ -778,6 +832,7 @@ function setFlip(v){
   flipped = v;
   win.classList.toggle("flipped", v);
   if (v) document.getElementById("b-tracks").scrollTop = 0;
+  carSync();                     /* 翻到背面 = 挂起轮播；翻回来再继续 */
 }
 
 /* ---------------- 曲目：按需拉取 + 本地缓存 7 天 ---------------- */
@@ -941,6 +996,7 @@ function openSearch(seed = ""){
   if (flipped) setFlip(false);
   searchOpen = true;
   syncMode();
+  carSync();                     /* 打开搜索浮层 = 挂起轮播 */
   win.classList.add("searching");
   qEl.value = seed;
   results = []; sel = 0;
@@ -952,6 +1008,7 @@ function openSearch(seed = ""){
 function closeSearch(){
   searchOpen = false;
   syncMode();
+  carSync();                     /* 关掉浮层：如果回到今日这一屏，轮播继续 */
   win.classList.remove("searching");
   qEl.blur();
   flash(true);
@@ -1092,6 +1149,7 @@ document.getElementById("tab-day").addEventListener("click", (e) => {
   e.stopPropagation();
   if (guest){ guest = false; show(queue[pos]); }   /* 从搜索选来的专辑回到今日这一屏 */
   closeSearch();                                   /* 顺手把搜索浮层收掉 */
+  carManualHold();                                 /* 回到这一屏也算手动，先多留一会儿 */
   flash(false);
 });
 document.getElementById("tab-search").addEventListener("click", (e) => {
@@ -1155,6 +1213,19 @@ addEventListener("keydown", (e) => {
   /* 2. 主窗口里禁用右键菜单 */
   document.addEventListener("contextmenu", (e) => e.preventDefault());
 
+  /* 轮播档位由托盘菜单决定：启动问一次，之后听事件（改完立刻生效，不用重启） */
+  invoke("get_carousel").then((v) => { carSec = Number(v) || 0; carSync(); }).catch(() => {});
+  if (T.event && T.event.listen){
+    T.event.listen("carousel-changed", (e) => {
+      carSec = Number(e.payload) || 0;
+      carStop();              /* 改档位对当前这张也立刻生效：按新时长重新开始倒数 */
+      car.left = -1;
+      carSync();
+    });
+    /* 窗口收进托盘 / 重新显示：让轮播挂起与恢复（visibilitychange 之外的兜底） */
+    T.event.listen("window-visible", (e) => { winVisible = !!e.payload; carSync(); });
+  }
+
   /* 4. 右上角 ✕ → 收起到托盘（不退出） */
   closeBtn.addEventListener("click", (e) => { e.stopPropagation(); invoke("hide_to_tray"); });
 
@@ -1202,7 +1273,11 @@ function refreshDay(){
   dayKey = k; queue = buildQueue(dayKey);
   if (!guest){ pos = 0; show(queue[0]); }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshDay(); });
+document.addEventListener("visibilitychange", () => {
+  winVisible = !document.hidden;   /* 收进托盘/最小化 → 轮播挂起；回来再继续 */
+  carSync();
+  if (!document.hidden) refreshDay();
+});
 
 (function boot(){
   const saved = STORE.get("view", null);
