@@ -398,6 +398,23 @@
   .heart.pop{transform:scale(1.18)}
   .heart svg{width:20px; height:20px}
   .heart.faved svg{fill:currentColor}
+  /* 点下去的那一圈涟漪：颜色跟着当前状态（收藏=红、取消=白），不需要任何文字 */
+  .heart::after{
+    content:""; position:absolute; inset:0; border-radius:50%; pointer-events:none;
+    box-shadow:0 0 0 2px currentColor; opacity:0;
+  }
+  .heart.pop::after{animation:heart-ring .46s var(--ease) forwards}
+  @keyframes heart-ring{
+    from{transform:scale(1); opacity:.6}
+    to{transform:scale(1.75); opacity:0}
+  }
+  /* 失败时抖一下，表示"没成功"，不假装成功 */
+  .heart.nope{animation:heart-shake .4s var(--ease)}
+  @keyframes heart-shake{
+    0%,100%{margin-left:-19px}
+    25%{margin-left:-25px}
+    75%{margin-left:-13px}
+  }
   @media (prefers-reduced-motion:reduce){
     *{animation-duration:.001ms !important; transition-duration:.001ms !important}
   }
@@ -685,7 +702,8 @@ function updateHeart(){
   h.classList.toggle("faved", !!(current && favIds.has(favKey(current))));
 }
 let heartTimer;
-const HEART_IDLE = 2600;          /* 心形静置多久后收走 */
+const HEART_IDLE = 2600;          /* 没点它：静置多久后收走 */
+const HEART_AFTER_CLICK = 850;    /* 点完：留这么久让你看清"变红/变空心"，然后干脆地走 */
 function hideHeart(){
   clearTimeout(heartTimer);
   document.getElementById("heart").classList.remove("show");
@@ -701,34 +719,49 @@ function showHeartAt(clientX, clientY){
   clearTimeout(heartTimer);
   heartTimer = setTimeout(hideHeart, HEART_IDLE);
 }
+/* 心形反馈：必须在"点下去的那一帧"就给出来。
+   收藏要下载封面 + 抓曲目（1~3 秒），所以这里先乐观地改状态（变红/变空心 + 弹 + 涟漪），
+   落盘失败再回滚并抖一下——不能等网络回来才给反馈，也不能假装成功。 */
 async function toggleFavorite(){
   const a = current;
   if (!a) return;
-  const on = favIds.has(favKey(a));
+  const k = favKey(a);
+  const wasFaved = favIds.has(k);
   const h = document.getElementById("heart");
-  if (typeof invoke === "function"){
-    try {
-      const list = on
-        ? await invoke("remove_favorite", { id: a.id, sf: a.sf })
-        : await invoke("add_favorite", {
-            album: {
-              id: a.id, sf: a.sf, title: a.title, artist: a.artist,
-              date: a.date || "", genre: a.genre || "", tracks: a.tracks || 0, art: a.art,
-            },
-          });
-      applyFavList(list);
-    } catch (err){
-      return;
-    }
-  } else {
-    /* 浏览器预览：只做视觉上的切换，不落盘（收藏列表本身仍然为空） */
-    if (on) favIds.delete(favKey(a)); else favIds.add(favKey(a));
-    updateHeart();
-  }
+
+  /* 1) 立刻反馈 */
+  if (wasFaved) favIds.delete(k); else favIds.add(k);
+  updateHeart();
+  h.classList.remove("pop");
+  void h.offsetWidth;                 /* 强制重排，连点也能重新播动画 */
   h.classList.add("pop");
-  setTimeout(() => h.classList.remove("pop"), 320);
-  hideHeart();                    /* 点完立刻收走，不赖在封面上 */
-  /* 正在收藏视图里取消了当前这张：从队列里挪走 */
+  setTimeout(() => h.classList.remove("pop"), 480);
+  clearTimeout(heartTimer);
+  heartTimer = setTimeout(hideHeart, HEART_AFTER_CLICK);
+
+  /* 2) 再落盘（浏览器里没有 invoke，保持"只做视觉"） */
+  if (typeof invoke !== "function") return;
+  try {
+    const list = wasFaved
+      ? await invoke("remove_favorite", { id: a.id, sf: a.sf })
+      : await invoke("add_favorite", {
+          album: {
+            id: a.id, sf: a.sf, title: a.title, artist: a.artist,
+            date: a.date || "", genre: a.genre || "", tracks: a.tracks || 0, art: a.art,
+          },
+        });
+    applyFavList(list);
+  } catch (err){
+    /* 3) 失败就回滚 + 抖一下，让人知道没成功 */
+    if (wasFaved) favIds.add(k); else favIds.delete(k);
+    updateHeart();
+    document.getElementById("heart").classList.add("show");
+    h.classList.add("nope");
+    setTimeout(() => h.classList.remove("nope"), 420);
+    clearTimeout(heartTimer);
+    heartTimer = setTimeout(hideHeart, 1600);
+    return;
+  }
   if (source === "fav") rebuildFavQueue();
 }
 function rebuildFavQueue(){
