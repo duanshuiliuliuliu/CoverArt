@@ -772,12 +772,14 @@ function step(d, { auto = false } = {}){
     if (guestList.length < 2) return;
     guestIndex = (guestIndex + d + guestList.length) % guestList.length;
     show(guestList[guestIndex], { isGuest: true });
-    flash(true);
+    if (!auto) flash(true);
     return;
   }
   pos = (pos + d + queue.length) % queue.length;
   show(queue[pos]);
-  flash(true);
+  /* 自动轮播换图时不亮任何控件：轮播就该是一张干净的封面
+     （手动切才亮出来，让人看到序号和左右箭头） */
+  if (!auto) flash(true);
 }
 
 function goToday(){
