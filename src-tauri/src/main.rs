@@ -5,6 +5,7 @@
 // 关闭：右上角的 ✕、Alt+F4 都只是收起到托盘，真正退出走托盘菜单的「退出」。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod daily;
 mod favorites;
 
 use std::fs;
@@ -309,6 +310,7 @@ fn main() {
             start_drag,
             open_external,
             get_carousel,
+            daily::daily_today,
             favorites::list_favorites,
             favorites::covers_dir_path,
             favorites::add_favorite,

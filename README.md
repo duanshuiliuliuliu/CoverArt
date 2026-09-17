@@ -22,7 +22,9 @@ npm run build        # 出 NSIS 安装包：src-tauri/target/release/bundle/nsis
 CoverArt/
 ├─ ui/index.html              界面本体（单文件，原生 HTML/CSS/JS，没有构建步骤）
 ├─ src-tauri/
-│  ├─ src/main.rs             只做一件事：起窗口
+│  ├─ src/main.rs             窗口 / 托盘 / 缩放 / 置顶 / 单实例
+│  ├─ src/daily.rs            每日这 20 张：联网随机抽 + 最近 60 天去重 + 落盘
+│  ├─ src/favorites.rs        收藏：索引、封面缓存、曲目缓存
 │  ├─ tauri.conf.json         窗口尺寸 / 无边框 / 不可缩放 都在这里
 │  └─ icons/                  应用图标（由 scripts/gen_icon.mjs 生成）
 ├─ scripts/
@@ -32,6 +34,7 @@ CoverArt/
 │  ├─ verify_carousel.ps1     真启动 exe，核对轮播开着会换图、关掉不换
 │  ├─ verify_favorite.ps1     真启动 exe，右键点心形收藏/取消，核对索引与本地图片
 │  ├─ verify_flip_click.ps1   复现「翻面后点返回箭头」那个 bug 的场景
+│  ├─ verify_daily.ps1        真启动 exe：核对每日 20 张、当日缓存复用、不与前几天重复
 │  └─ rebuild.ps1             先关掉正在运行的实例，再重新构建 exe
 └─ coverart-mini.html         浏览器预览外壳：方形区域里直接装 ui/index.html，永远不会和程序走样
 ```
@@ -60,6 +63,36 @@ CoverArt/
   - 退出
 
 缩放同时做两件事：窗口边长 = 560 × 档位，界面 zoom 也按同比例变化——这样「窗口 = 封面」的比例在任何档位都成立，界面里的按钮、字号相对封面的大小始终一致。缩放档位与「置顶」都写进 `%APPDATA%\com.coverart.desktop\prefs.json`，下次启动自动恢复。
+
+## 每日这 20 张
+
+没有内置曲库，每天现拉：启动时先看 `%APPDATA%\com.coverart.desktop\daily.json` 里今天这条在不在——
+
+- **在** → 直接用本地这份，不联网（第二次打开是秒开的）；
+- **不在** → 联网随机抽：每次随机挑 14 个来源并发抓（不够就再抓 10 个），候选去掉最近 **60 天**
+  出现过的专辑，再按「热门程度」加权抽 **20 张**；
+- 来源只取**主流市场**（us / gb / jp / de / fr / ca / au / tw / es / it / nl / se / br / mx，美英权重最高）：
+  主数据源是 Apple 按播放量排的 **most-played 专辑榜**（取前 60），另外掺一部分这些市场的**总榜**
+  和**美/英的分类型榜**（各取前 25）——能带出经典老专辑。小国冷门市场的榜单一个都不用；
+- 挑选规则：同一张专辑只上一次，**一个歌手一天只上一张**，**同一种风格一天最多 3 张**；
+  名次越靠前、被越多榜收录，被抽中的概率越大（这就是"主流"的量化）；
+- 精选集合辑一律扔掉：标题里带 greatest hits / best of / essential / collection / ベスト / 精选 / 金曲、
+  以及西班牙语意大利语葡萄牙语德语的各种"精选"写法；演唱者是 Various Artists / Artisti Vari /
+  Verschiedene Interpret:innen / 群星 这类合辑署名也直接扔掉；
+- 翻录盘和助眠音频也扔掉：karaoke / tribute / 摇篮曲 / 圣诞节 / 儿童 / 白噪音 / 雨声 / lofi 学习音乐 这些；
+- 候选里如果有**今天发行**的专辑，它会顶到第一张并挂上「发行纪念日」角标；
+- 拉的时候整窗是**一块毛玻璃**（有高光渐变 + 一道慢慢扫过的光条 + 转圈），第一张封面显示出来才撤掉；
+  真去联网的那次至少亮 **700ms**，免得网快的时候一闪而过看不见；
+- 断网又没缓存 → 退回最近成功的那一天（`stale: true`），一条都没有才弹错误层 +「重试」；
+- 历史只留最近 **60 天**，跨午夜会自动去拉新一天的。
+
+`daily.json` 长这样：
+
+```json
+{ "days": [ { "date": "2026-09-16", "albums": [ { "id": "…", "sf": "us", "title": "…",
+  "artist": "…", "date": "1985-09-16", "genre": "Rock", "tracks": 9,
+  "art": "https://is1-ssl.mzstatic.com/…/cover.jpg", "anniv": false } ] } ] }
+```
 
 ## 每日轮播
 

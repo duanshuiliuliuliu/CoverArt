@@ -357,11 +357,24 @@
 
   /* ================= 首次加载 / 出错 ================= */
   @keyframes fade{from{opacity:0} to{opacity:1}}
-  #boot{position:absolute; inset:0; z-index:8; display:grid; place-items:center;
-        background:#121214; transition:opacity .4s var(--ease)}
+  /* 加载今天这 20 张：整窗是一块磨砂玻璃（有高光、有一道慢慢扫过的高光条），
+     不然冷启动时背后什么都没有，纯黑一片会让人以为程序卡住了 */
+  #boot{position:absolute; inset:0; z-index:8; display:grid; place-items:center; overflow:hidden;
+        background:
+          radial-gradient(110% 80% at 22% 6%, rgba(255,255,255,.20), rgba(255,255,255,0) 60%),
+          radial-gradient(90% 70% at 88% 100%, rgba(150,175,255,.16), rgba(255,255,255,0) 62%),
+          linear-gradient(160deg, rgba(64,66,76,.72), rgba(22,23,28,.84));
+        -webkit-backdrop-filter:blur(40px) saturate(160%);
+        backdrop-filter:blur(40px) saturate(160%);
+        box-shadow:inset 0 1px 0 rgba(255,255,255,.16);
+        transition:opacity .4s var(--ease)}
+  #boot::after{content:""; position:absolute; inset:-30%;
+        background:linear-gradient(102deg, transparent 38%, rgba(255,255,255,.14) 50%, transparent 62%);
+        animation:sheen 2.8s linear infinite}
+  @keyframes sheen{from{transform:translateX(-42%)} to{transform:translateX(42%)}}
   #boot.off{opacity:0; pointer-events:none}
-  .spin{width:17px; height:17px; border-radius:50%;
-        border:1.5px solid rgba(255,255,255,.18); border-top-color:rgba(255,255,255,.72);
+  .spin{position:relative; z-index:1; width:19px; height:19px; border-radius:50%;
+        border:1.5px solid rgba(255,255,255,.22); border-top-color:rgba(255,255,255,.85);
         animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
   #err{position:absolute; inset:0; z-index:4; display:grid; place-items:center;
@@ -524,13 +537,11 @@
 <script>
 /* =========================================================================
    CoverArt 极简原型：窗口 = 封面
-   每日 20 张 ｜ ← → 换封面 ｜ ↑ ↓ / 滚轮 换日期 ｜ 双击翻面看曲目和详情
+   每日 20 张（每天联网随机抽，60 天内不重复）｜ ← → 换封面 ｜ 双击翻面看曲目和详情
    打字或 ⌘K 搜索 ｜ 右下角下载 3000×3000 ｜ T 回到今天
-   数据源：iTunes Search / Lookup API（无需 Key），封面最高 3000×3000
+   数据源：iTunes 榜单 + Search / Lookup API（无需 Key），封面最高 3000×3000
    ========================================================================= */
 
-/* ---------------- 内置策展池（构建期解析好的 89 张） ---------------- */
-const POOL = [{"id":"1474815798","sf":"us","title":"Abbey Road (2019 Mix)","artist":"The Beatles","date":"1969-09-26","genre":"Rock","tracks":17,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/48/53/43/485343e3-dd6a-0034-faec-f4b6403f8108/13UMGIM63890.rgb.jpg"},{"id":"1065975633","sf":"us","title":"The Wall","artist":"Pink Floyd","date":"1979-11-30","genre":"Rock","tracks":27,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/3e/17/ec/3e17ec6d-f980-c64f-19e0-a6fd8bbf0c10/886445635850.jpg"},{"id":"1065973975","sf":"us","title":"Wish You Were Here","artist":"Pink Floyd","date":"1975-09-12","genre":"Rock","tracks":6,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/aa/e0/ab/aae0ab6a-d906-a189-81bf-70b56aa43f7a/886445635843.jpg"},{"id":"1097861387","sf":"us","title":"OK Computer","artist":"Radiohead","date":"1997-05-21","genre":"Alternative","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/07/60/ba/0760ba0f-148c-b18f-d0ff-169ee96f3af5/634904078164.png"},{"id":"1097862870","sf":"us","title":"Kid A","artist":"Radiohead","date":"2000-10-02","genre":"Alternative","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/bd/8e/13/bd8e1358-b367-a689-cb84-cebd0b067dc4/634904078263.png"},{"id":"1109714933","sf":"us","title":"In Rainbows","artist":"Radiohead","date":"2007-10-10","genre":"Alternative","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/dd/50/c7/dd50c790-99ac-d3d0-5ab8-e3891fb8fd52/634904032463.png"},{"id":"1440851613","sf":"us","title":"The Velvet Underground & Nico (45th Anniversary Edition)","artist":"The Velvet Underground & Nico","date":"1967-03-12","genre":"Rock","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/92/93/39/9293397f-a707-237e-ec7e-0ca613a67e3c/06UMGIM04143.rgb.jpg"},{"id":"1039655668","sf":"us","title":"Aladdin Sane (2013 Remaster)","artist":"David Bowie","date":"1973-04-13","genre":"Glam Rock","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/32/aa/3e/32aa3eeb-830e-e378-dd40-ac2b701066d8/825646123582.jpg"},{"id":"1347895593","sf":"us","title":"Low (2017 Remaster)","artist":"David Bowie","date":"1977-01-14","genre":"Rock","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/f7/49/2d/f7492da6-164e-b023-4b17-937329c35458/190295842895.jpg"},{"id":"1476702180","sf":"us","title":"Unknown Pleasures (2019 Digital Master)","artist":"Joy Division","date":"1979-06-15","genre":"Goth Rock","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/13/90/c0/1390c072-4249-3739-7b3d-fd73ee4a5698/825646562831.jpg"},{"id":"267986379","sf":"us","title":"London Calling (Expanded Edition)","artist":"The Clash","date":"1979-12-14","genre":"Punk","tracks":40,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/93/cb/20/93cb201b-154b-7b74-a10b-48fbef9b3281/888880348937.jpg"},{"id":"594061854","sf":"us","title":"Rumours","artist":"Fleetwood Mac","date":"1977-02-04","genre":"Rock","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/4d/13/ba/4d13bac3-d3d5-7581-2c74-034219eadf2b/081227970949.jpg"},{"id":"269572838","sf":"us","title":"Thriller","artist":"Michael Jackson","date":"1982-11-29","genre":"Pop","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/32/4f/fd/324ffda2-9e51-8f6a-0c2d-c6fd2b41ac55/074643811224.jpg"},{"id":"1538081586","sf":"us","title":"What's Going On","artist":"Marvin Gaye","date":"1971-05-21","genre":"R&B/Soul","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/76/36/2d/76362d74-cb7a-8ef9-104e-cde1d858e9a9/20UMGIM95279.rgb.jpg"},{"id":"1440788438","sf":"us","title":"Songs in the Key of Life","artist":"Stevie Wonder","date":"1976-09-28","genre":"Motown","tracks":22,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music118/v4/eb/1f/12/eb1f12ec-474c-63aa-43af-09282f423b9d/00602537004737.rgb.jpg"},{"id":"1746833068","sf":"us","title":"Purple Rain","artist":"Prince & The Revolution","date":"1984-06-25","genre":"Soundtrack","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/00/17/f2/0017f24f-e580-b77a-71a8-1bc7b75881bf/603497822065.jpg"},{"id":"1440860389","sf":"us","title":"good kid, m.A.A.d city (Deluxe Version)","artist":"Kendrick Lamar","date":"2012-10-22","genre":"Hip-Hop/Rap","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/36/86/ec/3686ec99-dec4-0a01-8b74-2d8a9a0263a7/12UMGIM52988.rgb.jpg"},{"id":"1440871877","sf":"us","title":"To Pimp a Butterfly","artist":"Kendrick Lamar","date":"2015-03-15","genre":"Hip-Hop/Rap","tracks":17,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/b5/a6/91/b5a69171-5232-3d5b-9c15-8963802f83dd/15UMGIM15814.rgb.jpg"},{"id":"1460471924","sf":"us","title":"Lemonade","artist":"Beyoncé","date":"2016-04-23","genre":"Pop","tracks":15,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music113/v4/d7/8a/f8/d78af89e-510f-f4b7-b6f7-040a21908fda/886447691168.jpg"},{"id":"1445865909","sf":"us","title":"My Beautiful Dark Twisted Fantasy (Deluxe Edition)","artist":"Kanye West","date":"2010-01-01","genre":"Hip-Hop/Rap","tracks":16,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/37/da/7c/37da7cc5-2b6f-9bb8-30ba-8a8c3be3e16a/00602527584973.rgb.jpg"},{"id":"697194953","sf":"us","title":"Discovery","artist":"Daft Punk","date":"2001-03-12","genre":"Dance","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/fd/4a/77/fd4a77db-0ebc-d043-41a2-f32fa1bb0fb4/dj.qrikkdwj.jpg"},{"id":"617154241","sf":"us","title":"Random Access Memories","artist":"Daft Punk","date":"2013-05-17","genre":"Pop","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/e8/43/5f/e8435ffa-b6b9-b171-40ab-4ff3959ab661/886443919266.jpg"},{"id":"1668862636","sf":"us","title":"Selected Ambient Works 85-92","artist":"Aphex Twin","date":"1992-02-12","genre":"Electronic","tracks":13,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/5f/b3/e0/5fb3e08d-c2cd-3da4-6ad7-c5dc61803683/cover.jpg"},{"id":"281116024","sf":"us","title":"Music Has the Right to Children","artist":"Boards of Canada","date":"1998-04-20","genre":"Electronic","tracks":18,"art":"https://is1-ssl.mzstatic.com/image/thumb/Features125/v4/b5/4c/c2/b54cc20d-03f5-f2c4-4a0d-9b51ad65af89/dj.txuslqgv.jpg"},{"id":"601140186","sf":"us","title":"Comedown Machine","artist":"The Strokes","date":"2013-03-22","genre":"Alternative","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/9c/ae/7a/9cae7a72-29ed-08aa-1b42-913776bbb6ec/886443855571.jpg"},{"id":"663097964","sf":"us","title":"AM","artist":"Arctic Monkeys","date":"2013-09-09","genre":"Alternative","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/69/9c/b5/699cb5d6-115c-ff73-9d26-e57ea4350d72/887828031795.png"},{"id":"1497230760","sf":"us","title":"The Slow Rush","artist":"Tame Impala","date":"2020-02-14","genre":"Alternative","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/65/e3/e7/65e3e740-b69f-f5cb-f2e6-7dedb5265ac9/19UMGIM96748.rgb.jpg"},{"id":"328074546","sf":"us","title":"Illinois","artist":"Sufjan Stevens","date":"2005-07-04","genre":"Alternative","tracks":26,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/47/9e/a3/479ea382-2686-3ea9-3def-d67d81fb2ee3/mzi.lhtprasx.jpg"},{"id":"742432549","sf":"us","title":"Sound of Silver","artist":"LCD Soundsystem","date":"2007-03-12","genre":"Electronic","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/fb/fe/a5/fbfea51a-0130-d557-c1f4-9e5e98b7bab8/094638511359.jpg"},{"id":"1849107580","sf":"us","title":"xx (Deluxe)","artist":"The xx","date":"2009-11-18","genre":"Alternative","tracks":16,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/59/df/6b/59df6bec-17f5-b578-aee2-b1a772d2ab9b/889030044761.png"},{"id":"201281514","sf":"us","title":"Highway 61 Revisited","artist":"Bob Dylan","date":"1965-08-30","genre":"Rock","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/f8/ff/c0/f8ffc056-55b4-2033-657d-32492d1eea25/827969239926.jpg"},{"id":"1492263092","sf":"us","title":"Blue","artist":"Joni Mitchell","date":"1971-06-22","genre":"Singer/Songwriter","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/00/a2/43/00a24363-cf69-bfd2-a26a-a042d57ab141/075992719926.jpg"},{"id":"747087657","sf":"us","title":"Tapestry","artist":"Carole King","date":"1971-02-10","genre":"Singer/Songwriter","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/68/b6/0e/68b60e89-9d41-e8a1-bba2-05c750f0832b/dj.hwpyamqm.jpg"},{"id":"1276760743","sf":"us","title":"The Miseducation of Lauryn Hill","artist":"Lauryn Hill","date":"1998-08-19","genre":"Pop","tracks":16,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/09/6b/55/096b55c4-ee8f-23bd-df8f-0ca0821f3028/886446727189.jpg"},{"id":"1828766736","sf":"us","title":"DON'T TAP THE GLASS","artist":"Tyler, The Creator","date":"2025-07-21","genre":"Rap","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/9e/2b/93/9e2b93b7-43a9-e814-e0ae-c55a1b7e17d6/196873463513.jpg"},{"id":"1239977075","sf":"us","title":"Ctrl","artist":"SZA","date":"2017-06-09","genre":"R&B/Soul","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/a2/bc/ad/a2bcad46-b389-4be1-8bac-5a0959b0b8e4/886446548449.jpg"},{"id":"1450695723","sf":"us","title":"WHEN WE ALL FALL ASLEEP, WHERE DO WE GO?","artist":"Billie Eilish","date":"2019-03-29","genre":"Alternative","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/1a/37/d1/1a37d1b1-8508-54f2-f541-bf4e437dda76/19UMGIM05028.rgb.jpg"},{"id":"1499385848","sf":"us","title":"After Hours","artist":"The Weeknd","date":"2020-03-20","genre":"R&B/Soul","tracks":14,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/2b/b9/fe/2bb9fef5-d7f3-8345-25a9-db0e79fde4e4/20UMGIM11048.rgb.jpg"},{"id":"1713845538","sf":"us","title":"1989 (Taylor's Version) [Deluxe]","artist":"Taylor Swift","date":"2023-10-27","genre":"Pop","tracks":22,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/8e/35/6c/8e356cc2-0be4-b83b-d29e-b578623df2ac/23UM1IM34052.rgb.jpg"},{"id":"1544491232","sf":"us","title":"21","artist":"Adele","date":"2011-01-24","genre":"Pop","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/eb/ca/25/ebca2596-cd1e-b295-91a3-771c868d0a79/191404113868.png"},{"id":"893175779","sf":"us","title":"Untrue","artist":"Burial","date":"2007-11-05","genre":"Electronic","tracks":13,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/9d/0f/1c/9d0f1c2b-2fae-d8ac-3920-ce9ec5bc85b5/7982.jpg"},{"id":"1286229076","sf":"us","title":"There Is Love in You","artist":"Four Tet","date":"2010-01-25","genre":"Electronic","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/a3/f1/79/a3f17926-28ca-c3a2-6487-77595e677376/5034202025450_cover.jpg"},{"id":"1447442814","sf":"us","title":"Ágætis Byrjun","artist":"Sigur Rós","date":"1999-06-12","genre":"Alternative","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/f7/34/fd/f734fd6c-aeca-8052-825c-706d1c665a8b/190296941856.jpg"},{"id":"1839077554","sf":"us","title":"In the Aeroplane Over the Sea","artist":"Neutral Milk Hotel","date":"1998-02-20","genre":"Alternative","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/12/e3/5c/12e35c39-de5c-b501-3ef0-00f19fb3d513/56627.jpg"},{"id":"1556924265","sf":"us","title":"m b v","artist":"my bloody valentine","date":"2013-02-02","genre":"Alternative","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/f9/7e/6b/f97e6b94-f307-ae7f-e94c-d74860a44350/887830016094.png"},{"id":"399211729","sf":"us","title":"Souvlaki","artist":"Slowdive","date":"1993-05-17","genre":"Alternative","tracks":19,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/c2/a0/a4/c2a0a495-ec33-27f1-c6db-0dff1c3ba15d/dj.pzrqoswp.jpg"},{"id":"258198881","sf":"us","title":"Heaven Or Las Vegas (Remastered)","artist":"Cocteau Twins","date":"1990-08-21","genre":"Rock","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/76/cd/61/76cd61e7-0714-dce5-c48e-0f05f8fcb84b/652637001280.png"},{"id":"300948043","sf":"us","title":"Remain In Light","artist":"Talking Heads","date":"1980-10-08","genre":"Alternative","tracks":8,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music/87/5f/5b/mzi.zzquknhm.jpg"},{"id":"1525933483","sf":"us","title":"(What's The Story) Morning Glory? [Deluxe Remastered Edition]","artist":"Oasis","date":"1995-10-02","genre":"Indie Rock","tracks":40,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/34/2e/cb/342ecb17-ef19-816a-4ce5-e60b9ceec161/5051961073164.jpg"},{"id":"699665183","sf":"us","title":"Parklife","artist":"Blur","date":"1994-04-25","genre":"Pop/Rock","tracks":16,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/8a/71/66/8a71664b-3baa-537b-e008-b32d86da27bc/5099997227755.jpg"},{"id":"1040981945","sf":"us","title":"Power, Corruption & Lies","artist":"New Order","date":"1983-05-02","genre":"Pop","tracks":8,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/d2/3f/c8/d23fc8e7-3baa-eae3-7301-7a868d00ab09/825646053803.jpg"},{"id":"1174246686","sf":"us","title":"Violator (Deluxe)","artist":"Depeche Mode","date":"1990-03-19","genre":"Rock","tracks":15,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/5c/0e/66/5c0e66c0-d383-5641-3ec0-4bdb629c49ad/886445705119.jpg"},{"id":"726144557","sf":"us","title":"Trans-Europe Express (2009 Remaster)","artist":"Kraftwerk","date":"1977-03-01","genre":"Electronic","tracks":8,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/e2/80/bc/e280bcf9-4048-8c42-2b6b-d8b9c9bbed52/5099996602058_1500x1500_300dpi.jpg"},{"id":"724435863","sf":"us","title":"Ambient 1: Music for Airports","artist":"Brian Eno","date":"1978-03-01","genre":"Electronic","tracks":4,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/ee/71/42/ee71425d-6bc9-3df8-c90b-8539f59144ab/00724386649553.rgb.jpg"},{"id":"108233171","sf":"us","title":"Donuts","artist":"J Dilla","date":"2006-02-07","genre":"Hip-Hop/Rap","tracks":31,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/63/d3/c5/63d3c537-ac30-86e7-8e69-8a03a5346209/792.jpg"},{"id":"1440797243","sf":"us","title":"James Blake","artist":"James Blake","date":"2011-01-01","genre":"Electronic","tracks":13,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/c4/6b/7c/c46b7cd6-8514-2098-7efa-83790c3d4879/00602527614854.rgb.jpg"},{"id":"850571319","sf":"us","title":"Demon Days","artist":"Gorillaz","date":"2005-05-11","genre":"Alternative","tracks":15,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/1c/0f/81/1c0f818a-e458-dd84-6f1b-ccbdf5fe14d6/825646291045.jpg"},{"id":"535739206","sf":"tw","title":"范特西","artist":"周杰倫","date":"2001-09-14","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/a4/f2/f0/a4f2f0d4-cc80-d1a0-7f20-a0cc842a523c/JAY.jpg"},{"id":"535824731","sf":"tw","title":"葉惠美","artist":"周杰倫","date":"2003-07-31","genre":"華語流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/45/8a/e4/458ae484-dc8b-5683-ce04-8d2948346462/JAY.jpg"},{"id":"536114662","sf":"tw","title":"七里香","artist":"周杰倫","date":"2004-08-03","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/29/c1/2d/29c12de6-54b4-f549-9d9f-07d8a04221ea/JAY.jpg"},{"id":"1443287350","sf":"tw","title":"浮躁","artist":"王菲","date":"1996-06-03","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/f6/31/d6/f631d6d6-1fd0-272a-3feb-de30b4e69ace/00602517665095.rgb.jpg"},{"id":"965771664","sf":"tw","title":"唱遊","artist":"王菲","date":"1998-10-02","genre":"華語流行樂","tracks":13,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/58/0e/51/580e517e-69a0-decc-96a4-b39fee54945c/Untitled.jpg"},{"id":"1158763922","sf":"tw","title":"自傳","artist":"五月天","date":"2016-07-21","genre":"華語流行樂","tracks":15,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/64/a0/f1/64a0f1b8-a36b-ff10-509a-9a8f5fef53ff/dj.zfoqlnar.jpg"},{"id":"1538548871","sf":"tw","title":"万能青年旅店","artist":"萬能青年旅店","date":"2010-11-12","genre":"成人另類","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/62/43/86/6243868c-c362-74d0-68d5-1de5e89986ee/cover.jpg"},{"id":"818157917","sf":"tw","title":"華麗的冒險","artist":"陳綺貞","date":"2005-09-23","genre":"華語流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music/v4/c5/c5/b9/c5c5b9a5-7b08-1579-950e-6ad69d8f105a/2005_9-_1400.jpg"},{"id":"914664926","sf":"tw","title":"黑色柳丁","artist":"陶喆","date":"2002-08-09","genre":"華語流行樂","tracks":13,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/05/7a/97/057a9723-2dbd-873b-81e0-5090879b2942/825646245352.jpg"},{"id":"1443431909","sf":"tw","title":"吻別","artist":"張學友","date":"1993-03-05","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music118/v4/bf/c1/93/bfc19337-d44e-9bbc-2878-dec47d1c645d/00731451920820.rgb.jpg"},{"id":"1720704994","sf":"tw","title":"之乎者也","artist":"羅大佑","date":"1982-04-21","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/72/e7/c7/72e7c712-7417-e73a-d802-6569af1489df/cover.jpg"},{"id":"1725224566","sf":"tw","title":"舞孃","artist":"JOLIN蔡依林","date":"2006-02-05","genre":"流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/38/1a/41/381a413b-ece1-b8cf-60e1-a661c0b6124e/0094637170328.jpg"},{"id":"1461046017","sf":"tw","title":"小宇宙","artist":"蘇打綠","date":"2006-10-20","genre":"華語流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music123/v4/7f/bd/4a/7fbd4a4b-8f43-a16d-4c20-55d6df89e3a5/cover.jpg"},{"id":"1579903639","sf":"tw","title":"危險世界","artist":"方大同","date":"2014-04-11","genre":"華語流行樂","tracks":15,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/35/d7/2a/35d72a0a-7e0c-fc2d-b2da-4bd030219997/190296501159.jpg"},{"id":"799184005","sf":"tw","title":"一百種生活","artist":"盧廣仲","date":"2008-05-27","genre":"華語流行樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/e2/92/95/e2929549-0322-8277-749a-204abab3e4f6/box3-3cover_1400x1400.jpg"},{"id":"547978486","sf":"tw","title":"神的遊戲","artist":"張懸","date":"2012-08-10","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/86/1e/44/861e443d-36e4-cb28-2182-6c5784e87276/886443553392.jpg"},{"id":"158796449","sf":"tw","title":"黑夢","artist":"竇唯","date":"1994-10-06","genre":"華語搖滾","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Features115/v4/f9/ac/98/f9ac98e4-956f-c013-e703-8ae5b7cdb880/dj.flkwjbql.jpg"},{"id":"1585625540","sf":"tw","title":"新长征路上的摇滚","artist":"崔健","date":"1989-02-01","genre":"搖滾","tracks":9,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/52/8a/e9/528ae9b1-47a7-a082-8663-83dff561a4fd/cover.jpg"},{"id":"369655124","sf":"tw","title":"生如夏花","artist":"朴樹","date":"2003-11-25","genre":"華語流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music/28/3c/02/mzi.ldallbzu.jpg"},{"id":"905191001","sf":"tw","title":"時光·漫步","artist":"許巍","date":"2002-12-18","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music69/v4/3a/88/3a/3a883ac8-0e9c-b892-9f6d-d56f8781b53d/dj.jyjfitio.jpg"},{"id":"1743353783","sf":"tw","title":"Model","artist":"李榮浩","date":"2013-09-16","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/87/b2/89/87b289ae-5728-6133-88a8-2a2658a535aa/196872064728.jpg"},{"id":"1442447205","sf":"tw","title":"K2HD: 淡淡幽情","artist":"鄧麗君","date":"1983-01-01","genre":"華語流行樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/26/d7/4b/26d74b28-5b53-b449-149b-f2f0f8a306dc/10UMGIM24111.rgb.jpg"},{"id":"1722083311","sf":"tw","title":"樂與怒","artist":"Beyond","date":"1993-10-30","genre":"粵語流行樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/e5/82/34/e58234b6-e653-3c70-918b-c3056b36ec34/4710149707673_cover.jpg"},{"id":"1443374875","sf":"tw","title":"U 87","artist":"陳奕迅","date":"2005-06-07","genre":"粵語流行樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/62/52/5c/62525cbe-f9cd-90ee-820e-db3f75d29c80/00602498308905.rgb.jpg"},{"id":"300118707","sf":"tw","title":"拉活…莫文蔚","artist":"莫文蔚","date":"2007-11-22","genre":"華語流行樂","tracks":10,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/55/1b/13/551b1354-7ade-671f-928d-ec1f7cc7a0be/886972129228.jpg"},{"id":"1071753622","sf":"tw","title":"第二天堂(江南)","artist":"林俊傑","date":"2004-06-04","genre":"華語流行樂","tracks":11,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music49/v4/9b/98/eb/9b98ebae-69b1-8009-678c-65e94124e0a8/dj.cqtiyqmo.jpg"},{"id":"656556065","sf":"tw","title":"我是海雅谷慕","artist":"張震嶽","date":"2013-07-05","genre":"華語流行樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music/v4/68/be/c6/68bec6b8-c05a-558a-2d1b-a026a76a14de/2400.jpg"},{"id":"1762548480","sf":"tw","title":"匆匆","artist":"胡德夫","date":"2005-04-15","genre":"世界音樂","tracks":12,"art":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/f4/38/50/f4385039-b80a-ba23-66f3-bbc45c8ba76c/4711457850013.jpg"}];
 
 const API = "https://itunes.apple.com";
 const SIZE = { hi:"3000x3000bb.jpg", mid:"1000x1000bb.jpg", blur:"600x600bb.jpg", thumb:"100x100bb.jpg" };
@@ -541,62 +552,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = (ms) => { const s = Math.round(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 const key = (a) => a.id + ":" + a.sf;
 
-/* ---------------- 今日队列：日期种子确定性洗牌，同一天结果永远一致 ---------------- */
-function hash(str){
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return h >>> 0;
-}
-function mulberry32(seed){
-  return function(){
-    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-
-const DAILY = 20;                 /* 每天一屏 20 张 */
-
-/* 固定的洗牌顺序：每天取其中相邻的 20 张，所以「换日期 = 换一屏」，
-   连着看几天就能把整个策展池轮一遍，而不是每天重掷一次骰子。 */
-const ROTATION = (() => {
-  const rng = mulberry32(0x9E3779B9);
-  const arr = POOL.slice();
-  for (let i = arr.length - 1; i > 0; i--){
-    const j = Math.floor(rng() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-})();
-
-const dayIndexOf = (dayKey) => Math.floor(Date.parse(dayKey + "T00:00:00") / 86400000);
-
-function buildQueue(dayKey){
-  /* 每天往前推一整屏，所以相邻两天的 20 张基本不重复，
-     连着看四五天就能把整个策展池轮一遍。 */
-  const start = (((dayIndexOf(dayKey) * DAILY) % ROTATION.length) + ROTATION.length) % ROTATION.length;
-  const picks = [];
-  for (let i = 0; i < DAILY && i < ROTATION.length; i++)
-    picks.push({ ...ROTATION[(start + i) % ROTATION.length], _anniv:false });
-
-  /* 今天发行的专辑顶到第一张，作为今日头条 */
-  const md = dayKey.slice(5);
-  const own = POOL.find((a) => a.date && a.date.slice(5) === md);
-  if (own){
-    const at = picks.findIndex((p) => key(p) === key(own));
-    if (at > 0) picks.unshift(picks.splice(at, 1)[0]);
-    else if (at < 0) picks.unshift({ ...own, _anniv:false });
-    picks[0]._anniv = true;
-    picks.length = Math.min(picks.length, DAILY);
-  }
-  return picks;
-}
 
 /* ---------------- 状态 ---------------- */
 let dayKey = iso(new Date());
-let queue = buildQueue(dayKey);
+let dayQueue = [];      /* 今天这一屏的 20 张，见 loadDaily() */
+let queue = [];         /* 当前正在翻的这一串（每日 / 收藏） */
+let dailyBusy = false;  /* 正在拉今天这 20 张 */
 let pos = 0;
 let current = null;
 let mode = "day";       /* day（今日这一屏）| search（搜索浮层）| guest（搜索选来的专辑） */
@@ -764,9 +726,76 @@ function rebuildFavQueue(){
   show(queue[pos]);
 }
 
+/* ---------------- 每日一屏：每天联网随机抽 20 张 ----------------
+   桌面版交给 Rust（daily_today）：今天拉过就直接用本地那份，没拉过才联网，
+   联网时按「最近 60 天不重复」筛候选；浏览器里预览时退化成抓一个榜单。 */
+const DAILY_FAIL = "今天这 20 张没拉到，检查一下网络再重试";
+
+function applyDaily(albums){
+  dayQueue = (albums || []).map((a) => ({ ...a, _anniv: !!a.anniv }));
+}
+
+function invokeDaily(){
+  if (typeof invoke === "function") return invoke("daily_today", { date: dayKey });
+  return previewDaily();
+}
+
+/* 浏览器预览兜底：JSONP 抓一个榜单随机取 20 张（桌面版走不到这里） */
+async function previewDaily(){
+  const sf = ["us", "gb", "jp", "tw", "de", "fr"][(Math.random() * 6) | 0];
+  const g = [0, 14, 17, 7, 11, 20, 24][(Math.random() * 7) | 0];
+  const json = await fetchJson(`${API}/${sf}/rss/topalbums/limit=100${g ? "/genre=" + g : ""}/json`);
+  const rows = (json.feed && json.feed.entry) || [];
+  const list = rows.map((e) => ({
+    id: e.id.attributes["im:id"], sf,
+    title: e["im:name"].label, artist: e["im:artist"].label,
+    date: (e["im:releaseDate"] ? e["im:releaseDate"].label : "").slice(0, 10),
+    genre: e.category ? e.category.attributes.label : "",
+    tracks: Number(e["im:itemCount"] ? e["im:itemCount"].label : 0),
+    art: e["im:image"][e["im:image"].length - 1].label.replace(/\/\d+x\d+bb\..*$/, ""),
+  })).filter((a) => a.art);
+  for (let i = list.length - 1; i > 0; i--){
+    const j = (Math.random() * (i + 1)) | 0;
+    [list[i], list[j]] = [list[j], list[i]];
+  }
+  return { date: dayKey, albums: list.slice(0, 20) };
+}
+
+/* 拉今天这 20 张：拉的过程中整窗是毛玻璃（#boot 那层），第一张封面显示出来才撤掉。
+   真去联网的那次至少亮 700ms——网快的时候一闪而过，等于没看见。 */
+const GLASS_MIN_MS = 700;
+async function loadDaily(){
+  if (dailyBusy) return false;
+  dailyBusy = true;
+  const bootLayer = document.getElementById("boot");
+  bootLayer.classList.remove("off");
+  win.classList.add("loading");
+  const t0 = Date.now();
+  try {
+    const res = await invokeDaily();
+    if (!res.cached){
+      const left = GLASS_MIN_MS - (Date.now() - t0);
+      if (left > 0) await sleep(left);
+    }
+    applyDaily(res.albums);
+    return dayQueue.length > 0;
+  } catch (err){
+    if (!dayQueue.length){
+      errText.textContent = String((err && err.message) || DAILY_FAIL);
+      errBox.hidden = false;
+    }
+    return false;
+  } finally {
+    dailyBusy = false;
+    win.classList.remove("loading");
+    /* 没拿到就撤掉玻璃层，让底下的错误提示露出来 */
+    if (!dayQueue.length) bootLayer.classList.add("off");
+  }
+}
+
 /* ---------------- 两个队列（今日 / 收藏） ---------------- */
 function queueFor(src){
-  return src === "fav" ? favs.map(favToAlbum) : buildQueue(dayKey);
+  return src === "fav" ? favs.map(favToAlbum) : dayQueue;
 }
 function setPos(p){
   pos = p;
@@ -774,6 +803,7 @@ function setPos(p){
 }
 function switchSource(next){
   if (next === source) return;
+  if (next === "day" && !dayQueue.length){ goToday(); return; }   /* 今天还没拉到：先去拉 */
   srcPos[source] = pos;                 /* 记住这个队列翻到哪儿了 */
   source = next;
   queue = queueFor(source);
@@ -944,6 +974,7 @@ function step(d, { auto = false } = {}){
     if (!auto) flash(true);
     return;
   }
+  if (!queue.length) return;      /* 今天这 20 张还没拉到（或者拉挂了），没得翻 */
   pos = (pos + d + queue.length) % queue.length;
   setPos(pos);
   show(queue[pos]);
@@ -952,11 +983,13 @@ function step(d, { auto = false } = {}){
   if (!auto) flash(true);
 }
 
-function goToday(){
+async function goToday(){
   dayKey = iso(new Date());
   source = "day";
-  queue = buildQueue(dayKey);
   guest = false;
+  if (!dayQueue.length) await loadDaily();
+  if (!dayQueue.length) return;        /* 还是没拉到：错误层已经在提示了 */
+  queue = dayQueue;
   setPos(0);
   carStop(); car.left = -1; carManualHold();
   show(queue[0]);
@@ -1153,10 +1186,11 @@ function relevance(term, a){
   return s;
 }
 
-/* 接口不可用时退化成内置策展池的本地匹配，搜索不空手而归 */
+/* 接口不可用时退化成「今天这一屏 + 收藏」的本地匹配，搜索不空手而归 */
 function localSearch(term){
   const t = norm(term);
-  return POOL.filter((a) => norm(a.title).includes(t) || norm(a.artist).includes(t))
+  return dayQueue.concat(favs.map(favToAlbum))
+    .filter((a) => norm(a.title).includes(t) || norm(a.artist).includes(t))
     .map((a) => ({ ...a, _local:true }))
     .sort((a, b) => relevance(term, b) - relevance(term, a))
     .slice(0, 20);
@@ -1476,17 +1510,27 @@ addEventListener("keydown", (e) => {
   win.addEventListener("pointerleave", stopDrag);
 })();
 
-document.getElementById("err-retry").addEventListener("click", () => {
+document.getElementById("err-retry").addEventListener("click", async () => {
   errBox.hidden = true;
-  if (current) paint(current);
+  if (current){ paint(current); return; }        /* 只是封面挂了：重画这张就行 */
+  if (await loadDaily()){                        /* 每日没拉到：重新去拉今天这 20 张 */
+    queue = dayQueue;
+    setPos(0);
+    show(queue[0]);
+  }
 });
 
 /* 跨午夜时自动换成新一天的队列 */
-function refreshDay(){
+async function refreshDay(){
   const k = iso(new Date());
   if (k === dayKey) return;
-  dayKey = k; queue = buildQueue(dayKey);
-  if (source === "day" && !guest){ setPos(0); show(queue[0]); }
+  dayKey = k;
+  await loadDaily();
+  if (source === "day" && !guest && dayQueue.length){
+    queue = dayQueue;
+    setPos(0);
+    show(queue[0]);
+  }
 }
 document.addEventListener("visibilitychange", () => {
   winVisible = !document.hidden;   /* 收进托盘/最小化 → 轮播挂起；回来再继续 */
@@ -1494,10 +1538,13 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshDay();
 });
 
-(function boot(){
-  const saved = STORE.get("view", null);
-  if (saved && saved.date === dayKey && saved.pos < queue.length) setPos(saved.pos);
+(async function boot(){
   setTabs();
+  if (!await loadDaily()) return;      /* 拉不到就先停在错误提示上，等用户点重试 */
+
+  queue = dayQueue;
+  const saved = STORE.get("view", null);
+  if (saved && saved.date === dayKey && saved.pos < dayQueue.length) setPos(saved.pos);
   show(queue[pos]);
 
   /* 首次打开给一次手势提示，之后不再打扰 */
