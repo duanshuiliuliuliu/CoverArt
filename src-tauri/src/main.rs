@@ -7,6 +7,7 @@
 
 mod daily;
 mod favorites;
+mod pool;
 
 use std::fs;
 use std::path::PathBuf;
@@ -311,6 +312,7 @@ fn main() {
             open_external,
             get_carousel,
             daily::daily_today,
+            pool::pool_stats,
             favorites::list_favorites,
             favorites::covers_dir_path,
             favorites::add_favorite,

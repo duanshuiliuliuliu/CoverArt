@@ -1,4 +1,4 @@
-# Verifies the daily-20 pipeline end to end (ASCII only, PS 5.1 safe):
+﻿# Verifies the daily-20 pipeline end to end (ASCII only, PS 5.1 safe):
 #   1. wipe daily.json, launch the app  -> window shows the frosted loading
 #      layer first, then a cover; daily.json is written with today's 20 albums
 #   2. launch it again                  -> daily.json is NOT rewritten
@@ -22,6 +22,7 @@ public class W {
 $root = "C:\Myfiles\repo\nbs\CoverArt"
 $exe = Join-Path $root "src-tauri\target\release\coverart.exe"
 $daily = Join-Path $env:APPDATA "com.coverart.desktop\daily.json"
+$pool = Join-Path $env:APPDATA "com.coverart.desktop\pool.json"
 $shots = Join-Path $env:TEMP "coverart-daily-verify"
 New-Item -ItemType Directory -Force -Path $shots | Out-Null
 
@@ -69,6 +70,15 @@ $stamp2 = (Get-Item $daily).LastWriteTime
 Write-Output ("    mtime before/after = " + $stamp1.ToString("HH:mm:ss") + " / " + $stamp2.ToString("HH:mm:ss"))
 if ($stamp1 -ne $stamp2) { Write-Output "    FAIL: daily.json was rewritten, cache was not reused"; exit 1 }
 Write-Output "    OK: reused the local copy (no network round trip)"
+
+Write-Output "[2.5] pool.json (candidate pool built in the background)"
+if (Test-Path $pool) {
+  # PowerShell 5.1 的 ConvertFrom-Json 受不了大小写只差一点的键，交给 node 统计
+  $stats = node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const A=j.albums||[];const c=A.filter(a=>a.classic).length;const dec={};for(const a of A){const y=+((a.date||'').slice(0,4));const k=y?Math.floor(y/10)*10+'s':'?';dec[k]=(dec[k]||0)+1;}console.log('    pool = '+A.length+' albums ('+c+' classic) | era entries = '+((j.era_list||[]).length));console.log('    decades: '+Object.entries(dec).sort().map(([k,v])=>k+'='+v).join('  '));" $pool
+  $stats | ForEach-Object { Write-Output $_ }
+} else {
+  Write-Output "    (pool.json not built yet — first launch builds it in the background)"
+}
 
 Write-Output "[3] duplicate check against the previous 60 days"
 $hist = @{}

@@ -1,55 +1,36 @@
-// 每日一屏：不再内置策展池，改成每天联网随机抽 20 张。
+// 每日一屏：不再"每天现拉"，改成从候选池（pool.rs）里挑 20 张。
 //
-// 规则（按需求定的）：
-// - daily.json 只留最近 60 天，一天一条：{ date, albums }
-// - 启动时先看今天这条在不在：在就直接用本地这份，不联网（秒开）
-// - 不在才联网：从「店区 × 流派」的榜单里随机挑一批 feed 抓候选，剔掉最近 60 天
-//   出现过的专辑，再随机抽 20 张（同一张只上一次，尽量一个歌手一张）
-// - 断网又没缓存：退回最近成功的那一天（stale=true）；一次都没成功过才报错
+// 第一版参数（用户定的）：
+// - 结构：现代 8 / 经典 7 / 混合 5
+// - 经典那 7 张按年代分配：至少跨 3 个年代，单个年代最多 3 张
+// - 混合里留 2 张"探索位"，只从 B/C 档里抽
+// - 硬约束：专辑 60 天不重复、封面指纹 60 天不重复、同一歌手 1 张/天 + 7 天冷却
+// - 流派上下限；最近 30 天占比高的流派/年代会被降权（长期均衡）
+// - 池子还没建起来（< 40 张）时，退回"现抓一批"的老路径，保证第一屏永远有内容
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use crate::pool::{self, art_key, norm_base, year_of, PoolAlbum, Rng};
+
 /// 每天一屏 20 张
 const PER_DAY: usize = 20;
-/// 历史保留天数（去重就是对着这份历史比）
+/// 历史保留天数
 const KEEP_DAYS: usize = 60;
-/// 候选里攒够这么多张没重复的就收手；不够才抓第二批
-const ENOUGH: usize = 48;
-/// 同一种风格一天最多上几张
-const GENRE_CAP: usize = 3;
-/// 播放量榜取前 60（按播放量排的，靠后一点的也还是热门）；老榜单只看前 25
-const CAP_PLAYED: usize = 60;
-const CAP_CHART: usize = 25;
-const BATCH: [usize; 2] = [14, 10];
-
-/// 主流市场，数字是权重（美英给得最多）——小国冷门市场全部不要
-const MARKETS: [(&str, usize); 14] = [
-    ("us", 8),
-    ("gb", 6),
-    ("jp", 4),
-    ("de", 3),
-    ("fr", 3),
-    ("ca", 3),
-    ("au", 3),
-    ("tw", 3),
-    ("it", 2),
-    ("es", 2),
-    ("nl", 2),
-    ("se", 2),
-    ("br", 2),
-    ("mx", 2),
-];
-/// 分类型榜只给美/英开（这两个的分类榜最主流），每个榜给几份权重
-const GENRE_MARKETS: [&str; 2] = ["us", "gb"];
-const GENRE_WEIGHT: usize = 1;
-
-/// 主流流派 id（区域小语种 / 演歌 / 圣歌 / 健身 / 卡拉OK 这类都去掉）
-const GENRES: [u32; 11] = [2, 5, 7, 11, 14, 15, 17, 18, 20, 21, 23];
+/// 结构：现代 / 经典 / 混合
+const N_MODERN: usize = 8;
+const N_CLASSIC: usize = 7;
+/// 混合里的探索位
+const N_EXPLORE: usize = 2;
+/// 同一歌手展示后多少天不再出现
+const ARTIST_COOLDOWN_DAYS: i64 = 7;
+/// 近几年算"现代"
+const MODERN_YEARS: u16 = 6;
+/// 池子小于这个数就先按老办法现抓
+const POOL_MIN: usize = 40;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Album {
@@ -63,7 +44,7 @@ pub struct Album {
     pub genre: String,
     #[serde(default)]
     pub tracks: u32,
-    /// 图床基址（不带尺寸段），界面自己拼 3000 / 1000 / 600 / 100
+    /// 图床基址（不带尺寸段）
     pub art: String,
     /// 今天正好是这张的发行纪念日
     #[serde(default)]
@@ -89,7 +70,7 @@ pub struct Today {
     pub albums: Vec<Album>,
     /// true = 直接用本地这份，没有联网
     pub cached: bool,
-    /// true = 联网没成，退回了上一次成功的那天
+    /// true = 池子和网络都没成，退回了上一次成功的那天
     pub stale: bool,
 }
 
@@ -100,7 +81,6 @@ fn store_path(app: &AppHandle) -> Option<PathBuf> {
 fn load(app: &AppHandle) -> Store {
     let Some(path) = store_path(app) else { return Store::default() };
     let Ok(text) = fs::read_to_string(path) else { return Store::default() };
-    /* 有人用记事本改过就会有 BOM，先剥掉再解析 */
     let text = text.trim_start_matches('\u{feff}');
     serde_json::from_str::<Store>(text).unwrap_or_default()
 }
@@ -111,530 +91,498 @@ fn save(app: &AppHandle, store: &Store) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    /* 临时文件 + rename，避免写一半断电留下坏文件 */
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, text).map_err(|e| e.to_string())?;
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-/// 够用就行的随机源（xorshift64*），省得为了随机数再拉一个 crate
-struct Rng(u64);
+/* ---------------- 日期 ---------------- */
 
-impl Rng {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x2545F4914F6CDD1D);
-        Rng(nanos ^ 0x9E3779B97F4A7C15 | 1)
-    }
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
-    }
-    fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
-    }
-    /// [0, 1) 之间的小数
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-    fn shuffle<T>(&mut self, items: &mut [T]) {
-        for i in (1..items.len()).rev() {
-            let j = self.below(i + 1);
-            items.swap(i, j);
-        }
-    }
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
-/// 老榜单接口：总榜 / 分类型榜（能带出老专辑，但也有不少精选集）
-fn chart_url(sf: &str, genre: Option<u32>) -> String {
-    match genre {
-        Some(g) => format!("https://itunes.apple.com/{sf}/rss/topalbums/limit=100/genre={g}/json"),
-        None => format!("https://itunes.apple.com/{sf}/rss/topalbums/limit=100/json"),
-    }
-}
-
-/// 播放量榜：Apple 按播放量排出来的「最热门专辑」，比榜单接口主流得多
-fn played_url(sf: &str) -> String {
-    format!("https://rss.marketingtools.apple.com/api/v2/{sf}/music/most-played/100/albums.json")
-}
-
-/// 一个抓取来源
-#[derive(Clone, Copy)]
-struct Source {
-    sf: &'static str,
-    genre: Option<u32>,
-    played: bool,
-    /// 只认这个来源的前 cap 名
-    cap: usize,
-}
-
-/// 这批抓哪些源：主流市场的播放量榜为主，老榜单（含美/英分类型榜）做补充
-fn plan(rng: &mut Rng, count: usize) -> Vec<Source> {
-    let mut list: Vec<Source> = Vec::new();
-    for (sf, w) in MARKETS {
-        for _ in 0..w {
-            list.push(Source { sf, genre: None, played: true, cap: CAP_PLAYED });
-        }
-        /* 每个市场再留一份总榜，老专辑、经典专辑是从这里来的 */
-        list.push(Source { sf, genre: None, played: false, cap: CAP_CHART });
-    }
-    for sf in GENRE_MARKETS {
-        for _ in 0..GENRE_WEIGHT {
-            for g in GENRES {
-                list.push(Source { sf, genre: Some(g), played: false, cap: CAP_CHART });
-            }
-        }
-    }
-    rng.shuffle(&mut list);
-    list.truncate(count);
-    list
-}
-
-/// 形如 170x170bb.png 的尺寸段
-fn is_size_seg(seg: &str) -> bool {
-    let Some((wh, rest)) = seg.split_once("bb.") else { return false };
-    let Some((w, h)) = wh.split_once('x') else { return false };
-    !rest.is_empty()
-        && w.chars().all(|c| c.is_ascii_digit())
-        && h.chars().all(|c| c.is_ascii_digit())
-        && !w.is_empty()
-        && !h.is_empty()
-}
-
-/// RSS 给的是 .../cover.jpg/170x170bb.png 这种带尺寸的地址，砍掉尺寸段拿到基址
-fn art_base(url: &str) -> Option<String> {
-    let (head, tail) = url.rsplit_once('/')?;
-    if !is_size_seg(tail) || head.is_empty() {
-        return None;
-    }
-    Some(head.to_string())
+fn day_index(date: &str) -> i64 {
+    let y: i64 = date.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(1970);
+    let m: i64 = date.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let d: i64 = date.get(8..10).and_then(|s| s.parse().ok()).unwrap_or(1);
+    days_from_civil(y, m, d)
 }
 
 fn day_md(date: &str) -> &str {
     if date.len() >= 10 { &date[5..10] } else { "" }
 }
 
-/// 榜单里混着的卡拉OK / 致敬专辑封面很难看，直接扔掉
-fn junk(a: &Album) -> bool {
-    /* 标题里带这些的，基本是翻录盘 / 伴唱盘 */
-    const BAD_TITLE: &[&str] = &[
-        "karaoke",
-        "tribute",
-        "made popular by",
-        "in the style of",
-        "originally performed",
-        "as made famous",
-        "lullaby",
-        "berceuse",
-        "instrumental worship",
-        "cover music",
-        "relax mode",
-        "christmas",
-        "xmas",
-        "brown noise",
-        "white noise",
-        "rain sounds",
-        "nature sounds",
-        "meditation",
-        "relaxing",
-        "sleep",
-        "オルゴール",
-        "眠れる",
-        "睡眠",
-        "ヒーリング",
-        "癒し",
-        "子守唄",
-        "赤ちゃん",
-        "儿童",
-        "兒歌",
-        "催眠",
-        "白噪音",
-        "lofi",
-        "lo-fi",
-        "study music",
-        "study beats",
-        "type beat",
-        "beats to",
-        "trap beats",
-        "chill beats",
-        "asmr",
-    ];
-    /* 分类里带这些的（各语言都算上），也不是我们要的封面 */
-    const BAD_GENRE: &[&str] = &[
-        "karaoke", "lullab", "children", "kids", "kinder", "enfant", "niño", "nino", "christmas",
-        "navidad", "natal", "weihnacht", "fitness", "workout", "hörspiel", "hoerspiel",
-        "チルドレン", "キッズ", "こども", "子供", "赤ちゃん", "オルゴール", "睡眠", "ヒーリング",
-        "癒し", "동요", "자장가", "儿童", "兒歌", "催眠", "白噪音", "barn", "børn", "bambini",
-        "niños",
-    ];
-    let t = a.title.to_lowercase();
-    let g = a.genre.to_lowercase();
-    /* 环境音 / 助眠音频：歌手名和标题都算上（"Som De Chuva"、"Regen Macher" 这种） */
-    const BAD_ANY: &[&str] = &[
-        "regengeräusch",
-        "regen entspannung",
-        "chuva",
-        "trovoadas",
-        "rain sounds",
-        "rain and thunder",
-        "rainfall",
-        "lluvia",
-        "sonidos de",
-        "sounds of nature",
-        "nature sounds",
-        "brown noise",
-        "white noise",
-        "asmr",
-    ];
-    let both = format!("{} {}", a.artist.to_lowercase(), t);
-    BAD_TITLE.iter().any(|b| t.contains(b))
-        || BAD_GENRE.iter().any(|b| g.contains(b))
-        || BAD_ANY.iter().any(|b| both.contains(b))
-        || is_compilation(a)
-        || various_artists(a)
+/* ---------------- 展示历史：60 天冷却 + 7 天艺人冷却 + 30 天分布 ---------------- */
+
+struct History {
+    ids: HashSet<String>,
+    keys: HashSet<String>,
+    /// 艺人 -> 最后一次出现的天序号
+    artists: HashMap<String, i64>,
+    /// 最近 30 天的流派 / 年代分布
+    genres_30d: HashMap<&'static str, usize>,
+    decades_30d: HashMap<u8, usize>,
+    n_30d: usize,
 }
 
-/// 标题里带这些的，基本都是「精选集 / 合辑」
-fn is_compilation(a: &Album) -> bool {
-    /* 标点统一成空格、撇号去掉，好按"词"判断："Best Of" / "best-of" / "That's" 都能对上 */
-    let no_quote: String = a.title.to_lowercase().replace(['\'', '’', '`'], "");
-    let t: String = no_quote
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect();
-    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    const PHRASES: &[&str] = &[
-        "greatest hits",
-        "best of",
-        "the best",
-        "very best",
-        "all time",
-        "top hits",
-        "now that s what i call",
-        "the essential",
-        "hits collection",
-        "grandes exitos",
-        "grandes éxitos",
-        "los mejores",
-        "lo mejor de",
-        "coleccion",
-        "colección",
-        "antologia",
-        "antología",
-        "os maiores sucessos",
-        "melhores",
-        "coletanea",
-        "coletânea",
-        "das beste",
-        "il meglio",
-        "les meilleurs",
-        "meilleur de",
-        "number ones",
-    ];
-    const WORDS: &[&str] = &[
-        "hits",
-        "best",
-        "gold",
-        "essential",
-        "collection",
-        "anthology",
-        "compilation",
-        "playlist",
-        "definitive",
-        "singles",
-        "tutto",
-        "tutti",
-        "successi",
-        "sucessos",
-        "exitos",
-        "éxitos",
-        "raccolta",
-        "recopilatorio",
-        "integral",
-        "anthologie",
-        "greatest",
-    ];
-    const CJK: &[&str] = &[
-        "ベスト", "全曲集", "コンプリート", "精選", "精选", "合辑", "合輯", "精选集", "精選集",
-        "金曲", "典藏",
-    ];
-
-    PHRASES.iter().any(|p| t.contains(p))
-        || CJK.iter().any(|p| a.title.contains(p))
-        || t.split_whitespace().any(|w| WORDS.contains(&w))
-}
-
-/// 演唱者字段是「群星」的，也是合辑
-fn various_artists(a: &Album) -> bool {
-    const VA: &[&str] = &[
-        "various artists",
-        "various",
-        "verschiedene interpret",
-        "verschillende artiesten",
-        "divers interpr",
-        "vários intérpretes",
-        "varios artistas",
-        "vários artistas",
-        "multi-interprètes",
-        "multi interpretes",
-        "artisti vari",
-        "artistes variés",
-        "interpreti vari",
-        "群星",
-    ];
-    let s = a.artist.to_lowercase();
-    VA.iter().any(|v| s.contains(v))
-}
-
-fn parse_feed(json: &serde_json::Value, sf: &str) -> Vec<Album> {
-    let Some(rows) = json.pointer("/feed/entry").and_then(|v| v.as_array()) else { return Vec::new() };
-    let mut out = Vec::with_capacity(rows.len());
-    for e in rows {
-        let id = e.pointer("/id/attributes/im:id").and_then(|v| v.as_str()).unwrap_or("");
-        let title = e.pointer("/im:name/label").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let artist = e.pointer("/im:artist/label").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let art = e
-            .pointer("/im:image")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.last())
-            .and_then(|i| i.get("label"))
-            .and_then(|v| v.as_str())
-            .and_then(art_base);
-        let (Some(art), true) = (art, !id.is_empty() && !title.is_empty() && !artist.is_empty())
-        else {
-            continue;
+impl History {
+    fn build(store: &Store, today: &str) -> Self {
+        let today_idx = day_index(today);
+        let mut h = History {
+            ids: HashSet::new(),
+            keys: HashSet::new(),
+            artists: HashMap::new(),
+            genres_30d: HashMap::new(),
+            decades_30d: HashMap::new(),
+            n_30d: 0,
         };
-        let released = e.pointer("/im:releaseDate/label").and_then(|v| v.as_str()).unwrap_or("");
-        out.push(Album {
-            id: id.to_string(),
-            sf: sf.to_string(),
-            title: title.to_string(),
-            artist: artist.to_string(),
-            date: released.get(..10).unwrap_or("").to_string(),
-            genre: e
-                .pointer("/category/attributes/label")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tracks: e
-                .pointer("/im:itemCount/label")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
-            art,
-            anniv: false,
-        });
+        for day in &store.days {
+            let idx = day_index(&day.date);
+            let age = today_idx - idx;
+            if age < 0 {
+                continue;
+            }
+            let recent = age < KEEP_DAYS as i64;
+            let last30 = age < 30;
+            for a in &day.albums {
+                if recent {
+                    h.ids.insert(a.id.clone());
+                    h.keys.insert(art_key(&a.artist, &a.title));
+                }
+                let ka = norm_base(&a.artist);
+                let e = h.artists.entry(ka).or_insert(idx);
+                if idx > *e {
+                    *e = idx;
+                }
+                if last30 {
+                    *h.genres_30d.entry(genre_group(&a.genre)).or_insert(0) += 1;
+                    *h.decades_30d.entry(era_slot(year_of(&a.date))).or_insert(0) += 1;
+                    h.n_30d += 1;
+                }
+            }
+        }
+        h
     }
-    out
+
+    fn artist_last(&self, artist: &str) -> Option<i64> {
+        self.artists.get(&norm_base(artist)).copied()
+    }
+
+    fn genre_share(&self, group: &str) -> f64 {
+        if self.n_30d == 0 {
+            return 0.0;
+        }
+        *self.genres_30d.get(group).unwrap_or(&0) as f64 / self.n_30d as f64
+    }
+
+    fn era_share(&self, slot: u8) -> f64 {
+        if self.n_30d == 0 {
+            return 0.0;
+        }
+        *self.decades_30d.get(&slot).unwrap_or(&0) as f64 / self.n_30d as f64
+    }
 }
 
-/// 播放量榜的结构（feed.results）跟老榜单不一样，单独解析
-fn parse_played(json: &serde_json::Value, sf: &str) -> Vec<Album> {
-    let Some(rows) = json.pointer("/feed/results").and_then(|v| v.as_array()) else { return Vec::new() };
-    let mut out = Vec::with_capacity(rows.len());
-    for e in rows {
-        let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let title = e.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let artist = e.get("artistName").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let art = e.get("artworkUrl100").and_then(|v| v.as_str()).and_then(art_base);
-        let (Some(art), true) = (art, !id.is_empty() && !title.is_empty() && !artist.is_empty())
-        else {
-            continue;
-        };
-        let released = e.get("releaseDate").and_then(|v| v.as_str()).unwrap_or("");
-        out.push(Album {
-            id: id.to_string(),
-            sf: sf.to_string(),
-            title: title.to_string(),
-            artist: artist.to_string(),
-            date: released.get(..10).unwrap_or("").to_string(),
-            genre: e
-                .pointer("/genres/0/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tracks: 0, /* 这个接口不给曲目数，翻到背面会现查 */
-            art,
-            anniv: false,
-        });
-    }
-    out
-}
+/* ---------------- 流派分组与上下限 ---------------- */
 
-async fn fetch_source(client: &reqwest::Client, src: Source) -> Vec<Album> {
-    let url = if src.played { played_url(src.sf) } else { chart_url(src.sf, src.genre) };
-    let Ok(res) = client.get(&url).send().await else { return Vec::new() };
-    if !res.status().is_success() {
-        return Vec::new();
-    }
-    let Ok(json) = res.json::<serde_json::Value>().await else { return Vec::new() };
-    if src.played {
-        parse_played(&json, src.sf)
+fn genre_group(g: &str) -> &'static str {
+    let g = g.to_lowercase();
+    let has = |keys: &[&str]| keys.iter().any(|k| g.contains(k));
+    if has(&["hip-hop", "hip hop", "hiphop", "rap", "嘻哈", "饒舌", "饶舌", "說唱", "说唱"]) {
+        "hiphop"
+    } else if has(&["r&b", "rnb", "soul", "灵魂", "靈魂", "節奏藍調", "节奏蓝调"]) {
+        "rnb"
+    } else if has(&[
+        "electronic", "electronica", "dance", "house", "techno", "trance", "edm", "電子", "电子",
+        "舞曲",
+    ]) {
+        "electronic"
+    } else if has(&["alternative", "indie", "另類", "另类"]) {
+        "alternative"
+    } else if has(&["metal", "金屬", "金属"]) {
+        "metal"
+    } else if has(&["rock", "搖滾", "摇滚"]) {
+        "rock"
+    } else if has(&["jazz", "爵士"]) {
+        "jazz"
+    } else if has(&["classical", "opera", "古典", "歌劇", "歌剧"]) {
+        "classical"
+    } else if has(&["country", "folk", "bluegrass", "鄉村", "乡村", "民謠", "民谣"]) {
+        "country"
+    } else if has(&["pop", "流行"]) {
+        "pop"
     } else {
-        parse_feed(&json, src.sf)
+        "other"
     }
 }
 
-/// 一个候选：除了专辑本身，还记着它在榜上的最好名次、被几个榜收录过
-struct Cand {
-    album: Album,
-    hits: u32,
-    rank: usize,
+fn genre_cap(group: &str) -> usize {
+    match group {
+        "pop" => 5,
+        "rock" => 5,
+        "hiphop" => 4,
+        "rnb" => 3,
+        "electronic" => 3,
+        "alternative" => 3,
+        "jazz" => 2,
+        "country" => 2,
+        "metal" => 2,
+        "classical" => 2,
+        _ => 3,
+    }
 }
 
-/// 名次越靠前、被越多榜单收录 → 抽中的概率越大（这就是"主流"的量化）
-fn cand_weight(c: &Cand) -> f64 {
-    (c.hits as f64) / (1.0 + c.rank as f64 / 8.0)
+/// 年代桶：0=<1970 1=70s 2=80s 3=90s 4=00s 5=10s 6=更晚/未知
+fn era_slot(year: u16) -> u8 {
+    match year {
+        0 => 6,
+        y if y < 1970 => 0,
+        y if y < 1980 => 1,
+        y if y < 1990 => 2,
+        y if y < 2000 => 3,
+        y if y < 2010 => 4,
+        y if y < 2020 => 5,
+        _ => 6,
+    }
 }
 
-/// 按权重抽一个下标
-fn weighted_index(cands: &[Cand], rng: &mut Rng) -> usize {
-    let total: f64 = cands.iter().map(cand_weight).sum();
-    let mut r = rng.unit() * total;
-    for (i, c) in cands.iter().enumerate() {
-        r -= cand_weight(c);
-        if r <= 0.0 {
-            return i;
+/* ---------------- 抽签 ---------------- */
+
+fn tier_weight(tier: u8, explore: bool) -> f64 {
+    match (tier, explore) {
+        (3, false) => 40.0,
+        (2, false) => 24.0,
+        (1, false) => 9.0,
+        (0, false) => 3.0,
+        /* 探索位：只想要"没那么大众"的那两档 */
+        (1, true) => 30.0,
+        (0, true) => 12.0,
+        _ => 0.0,
+    }
+}
+
+struct Picker {
+    taken: HashSet<usize>,
+    artists: HashSet<String>,
+    genres: HashMap<&'static str, usize>,
+    keys: HashSet<String>,
+}
+
+impl Picker {
+    fn new() -> Self {
+        Picker {
+            taken: HashSet::new(),
+            artists: HashSet::new(),
+            genres: HashMap::new(),
+            keys: HashSet::new(),
         }
     }
-    cands.len() - 1
+
+    fn can_take(&self, a: &PoolAlbum, cap_genre: bool) -> bool {
+        if self.artists.contains(&norm_base(&a.artist)) || self.keys.contains(&a.key) {
+            return false;
+        }
+        if cap_genre {
+            let g = genre_group(&a.genre);
+            if *self.genres.get(g).unwrap_or(&0) >= genre_cap(g) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn take(&mut self, i: usize, a: &PoolAlbum) {
+        self.taken.insert(i);
+        self.artists.insert(norm_base(&a.artist));
+        self.keys.insert(a.key.clone());
+        *self.genres.entry(genre_group(&a.genre)).or_insert(0) += 1;
+    }
 }
 
-/// 从新鲜候选里挑 20 张：按名次加权抽，一个歌手一天只上一张、一种风格最多三张，
-/// 凑不够再放宽；候选里如果有今天发行的，顶到第一张当头条（角标「发行纪念日」）
-fn pick(mut cands: Vec<Cand>, date: &str, rng: &mut Rng) -> Vec<Album> {
+/// 从候选下标里按权重抽一张；explore = 只抽 B/C 档
+fn draw_one(
+    cands: &[usize],
+    pool: &[&PoolAlbum],
+    hist: &History,
+    rng: &mut Rng,
+    picker: &Picker,
+    explore: bool,
+    cap_genre: bool,
+) -> Option<usize> {
+    let mut weights: Vec<(usize, f64)> = Vec::with_capacity(cands.len());
+    for &i in cands {
+        if picker.taken.contains(&i) {
+            continue;
+        }
+        let a = pool[i];
+        if !picker.can_take(a, cap_genre) {
+            continue;
+        }
+        let tw = tier_weight(a.tier, explore);
+        if tw <= 0.0 {
+            continue;
+        }
+        /* 长期均衡：最近 30 天出现得多的流派 / 年代降权 */
+        let bal = 1.0 / (1.0 + 2.0 * hist.genre_share(genre_group(&a.genre)))
+            * 1.0 / (1.0 + 1.2 * hist.era_share(era_slot(a.year())));
+        weights.push((i, tw * bal));
+    }
+    if weights.is_empty() {
+        return None;
+    }
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    let mut r = rng.unit() * total;
+    for (i, w) in &weights {
+        r -= w;
+        if r <= 0.0 {
+            return Some(*i);
+        }
+    }
+    weights.last().map(|(i, _)| *i)
+}
+
+/// 经典那 7 张的年代分配：至少跨 3 个年代，单年代最多 3 张
+fn decade_plan(rng: &mut Rng) -> Vec<u8> {
+    for _ in 0..40 {
+        let mut counts = [0usize; 6];
+        let mut plan = Vec::with_capacity(N_CLASSIC);
+        let mut guard = 0;
+        while plan.len() < N_CLASSIC && guard < 200 {
+            guard += 1;
+            let slot = rng.below(6) as u8;
+            if counts[slot as usize] >= 3 {
+                continue;
+            }
+            counts[slot as usize] += 1;
+            plan.push(slot);
+        }
+        let distinct = counts.iter().filter(|c| **c > 0).count();
+        if plan.len() == N_CLASSIC && distinct >= 3 {
+            return plan;
+        }
+    }
+    vec![0, 1, 2, 3, 4, 5, 3]
+}
+
+fn to_album(a: &PoolAlbum) -> Album {
+    Album {
+        id: a.id.clone(),
+        sf: a.sf.clone(),
+        title: a.title.clone(),
+        artist: a.artist.clone(),
+        date: a.date.clone(),
+        genre: a.genre.clone(),
+        tracks: a.tracks,
+        art: a.art.clone(),
+        anniv: false,
+    }
+}
+
+/// 从池子里挑今天这 20 张
+fn select(pool_rows: &[PoolAlbum], hist: &History, today: &str, rng: &mut Rng) -> Vec<Album> {
+    let today_idx = day_index(today);
+    let now_year = year_of(today);
+    let modern_from = now_year.saturating_sub(MODERN_YEARS);
+
+    /* 冷却过滤：60 天内的专辑 / 封面不要，7 天内的歌手不要 */
+    let mut cands: Vec<&PoolAlbum> = Vec::with_capacity(pool_rows.len());
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    for a in pool_rows {
+        if a.art.is_empty() || a.id.is_empty() {
+            continue;
+        }
+        if hist.ids.contains(&a.id) || hist.keys.contains(&a.key) {
+            continue;
+        }
+        if let Some(last) = hist.artist_last(&a.artist) {
+            if today_idx - last < ARTIST_COOLDOWN_DAYS {
+                continue;
+            }
+        }
+        /* 同一张封面只留分数最高的一条 */
+        match by_key.get(&a.key) {
+            Some(&j) if cands[j].score >= a.score => continue,
+            _ => {
+                by_key.insert(a.key.clone(), cands.len());
+                cands.push(a);
+            }
+        }
+    }
     if cands.is_empty() {
         return Vec::new();
     }
 
+    let modern: Vec<usize> =
+        (0..cands.len()).filter(|i| cands[*i].year() >= modern_from).collect();
+    let classic: Vec<usize> = (0..cands.len())
+        .filter(|i| {
+            let y = cands[*i].year();
+            y > 0 && y < modern_from
+        })
+        .collect();
+    let decades: Vec<Vec<usize>> = (0..6)
+        .map(|slot| {
+            classic
+                .iter()
+                .copied()
+                .filter(|i| era_slot(cands[*i].year()) == slot as u8)
+                .collect()
+        })
+        .collect();
+    let all: Vec<usize> = (0..cands.len()).collect();
+
+    let mut picker = Picker::new();
     let mut out: Vec<Album> = Vec::with_capacity(PER_DAY);
-    let md = day_md(date);
-    if !md.is_empty() {
-        if let Some(i) = cands.iter().position(|c| day_md(&c.album.date) == md) {
-            let mut hero = cands.remove(i).album;
-            hero.anniv = true;
-            out.push(hero);
-        }
-    }
 
-    let mut artists: HashSet<String> = out.iter().map(|a| a.artist.to_lowercase()).collect();
-    let mut genres: HashMap<String, usize> = HashMap::new();
-    for a in &out {
-        *genres.entry(a.genre.to_lowercase()).or_insert(0) += 1;
-    }
-
-    let mut blocked: Vec<Cand> = Vec::new();
-    while out.len() < PER_DAY && !cands.is_empty() {
-        let c = cands.remove(weighted_index(&cands, rng));
-        let genre = c.album.genre.to_lowercase();
-        if genres.get(&genre).copied().unwrap_or(0) >= GENRE_CAP {
-            blocked.push(c); /* 同一种风格一天最多三张，免得一屏全是乡村 */
-            continue;
-        }
-        if !artists.insert(c.album.artist.to_lowercase()) {
-            blocked.push(c);
-            continue;
-        }
-        *genres.entry(genre).or_insert(0) += 1;
-        out.push(c.album);
-    }
-
-    /* 实在凑不够就放宽：先吃刚被风格 / 歌手挡下来的，再吃名次靠后的 */
-    let mut have: HashSet<String> = out.iter().map(|a| a.id.clone()).collect();
-    for c in blocked.into_iter().chain(cands) {
-        if out.len() >= PER_DAY {
+    /* 1) 先抽经典 7 张（按年代分配）——放前面是为了别让 pop/rock 的名额先被现代位吃掉，
+       这里只从经典里抽，抽不到就跳过这个名额，留给后面的混合位 */
+    let plan = decade_plan(rng);
+    for slot in plan {
+        if out.len() >= N_CLASSIC {
             break;
         }
-        if have.insert(c.album.id.clone()) {
-            out.push(c.album);
-        }
+        let picked = draw_one(&decades[slot as usize], &cands, hist, rng, &picker, false, true)
+            .or_else(|| draw_one(&classic, &cands, hist, rng, &picker, false, true));
+        let Some(i) = picked else { break };
+        picker.take(i, cands[i]);
+        out.push(to_album(cands[i]));
     }
 
+    /* 2) 现代 8 张 */
+    while out.len() < N_CLASSIC + N_MODERN {
+        let Some(i) = draw_one(&modern, &cands, hist, rng, &picker, false, true)
+            .or_else(|| draw_one(&all, &cands, hist, rng, &picker, false, true))
+        else {
+            break;
+        };
+        picker.take(i, cands[i]);
+        out.push(to_album(cands[i]));
+    }
+
+    /* 3) 补齐剩下的（混合位），其中 2 张留给"探索位" */
+    let mixed_start = out.len();
+    let mixed_total = PER_DAY - mixed_start;
+    let explore_at = mixed_total.saturating_sub(N_EXPLORE);
+    let mut filled = 0usize;
+    while out.len() < PER_DAY {
+        let explore = filled >= explore_at;
+        let picked = draw_one(&all, &cands, hist, rng, &picker, explore, true)
+            .or_else(|| draw_one(&all, &cands, hist, rng, &picker, false, true));
+        let Some(i) = picked else { break };
+        picker.take(i, cands[i]);
+        out.push(to_album(cands[i]));
+        filled += 1;
+    }
+
+    /* 4) 还差就松开流派上限再补 */
+    while out.len() < PER_DAY {
+        let Some(i) = draw_one(&all, &cands, hist, rng, &picker, false, false) else { break };
+        picker.take(i, cands[i]);
+        out.push(to_album(cands[i]));
+    }
+
+    /* 5) 今天发行的顶到第一张当头条，其余打乱 */
+    let md = day_md(today);
+    if !md.is_empty() && !out.is_empty() {
+        if let Some(pos) = out.iter().position(|a| day_md(&a.date) == md) {
+            let mut hero = out.remove(pos);
+            hero.anniv = true;
+            out.insert(0, hero);
+        }
+    }
     if out.len() > 1 {
-        rng.shuffle(&mut out[1..]); /* 头条留着，其余打乱 */
+        let head = out.remove(0);
+        rng.shuffle(&mut out);
+        out.insert(0, head);
     }
     out
 }
 
-/// 抓一整天：凑够 ENOUGH 张没重复的就停，最多抓两批
-async fn fetch_day(date: &str, used: &HashSet<String>) -> Vec<Album> {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .user_agent("CoverArt/0.1 (+https://github.com/duanshuiliuliuliu/CoverArt)")
-        .build()
-    else {
-        return Vec::new();
-    };
+/* ---------------- 池子还没建好时的兜底：现抓一批 ---------------- */
 
+async fn fallback_fetch(date: &str, store: &Store) -> Vec<Album> {
+    let used: HashSet<String> =
+        store.days.iter().flat_map(|d| d.albums.iter().map(|a| a.id.clone())).collect();
+    let rows = pool::fetch_fresh(20).await;
     let mut rng = Rng::new();
-    let mut fresh: Vec<Cand> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-
-    for batch in BATCH {
-        let sources = plan(&mut rng, batch);
-        let mut handles = Vec::with_capacity(batch);
-        for src in sources.iter().copied() {
-            let client = client.clone();
-            handles.push(tauri::async_runtime::spawn(async move {
-                fetch_source(&client, src).await
-            }));
+    let mut cands: Vec<PoolAlbum> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (a, _rank) in rows {
+        if used.contains(&a.id) || !seen.insert(a.id.clone()) {
+            continue;
         }
-        for (i, h) in handles.into_iter().enumerate() {
-            let cap = sources[i].cap;
-            let Ok(rows) = h.await else { continue };
-            for (rank, a) in rows.into_iter().enumerate() {
-                /* 名次太靠后的不要：这是"主流"的第一道闸 */
-                if rank >= cap {
-                    break;
-                }
-                /* 最近 60 天出现过的不算；精选集合辑、翻录盘也不要 */
-                if used.contains(&a.id) || junk(&a) {
-                    continue;
-                }
-                match seen.get(&a.id) {
-                    /* 被多个榜收录：命中次数 +1，取最好的名次 */
-                    Some(&i) => {
-                        fresh[i].hits += 1;
-                        fresh[i].rank = fresh[i].rank.min(rank);
-                    }
-                    None => {
-                        seen.insert(a.id.clone(), fresh.len());
-                        fresh.push(Cand { album: a, hits: 1, rank });
-                    }
-                }
-            }
-        }
-        if fresh.len() >= ENOUGH {
+        cands.push(a);
+    }
+    rng.shuffle(&mut cands);
+    let mut out: Vec<Album> = Vec::new();
+    let mut artists: HashSet<String> = HashSet::new();
+    let mut genres: HashMap<&'static str, usize> = HashMap::new();
+    for a in &cands {
+        if out.len() >= PER_DAY {
             break;
         }
+        if !artists.insert(norm_base(&a.artist)) {
+            continue;
+        }
+        let g = genre_group(&a.genre);
+        if *genres.get(g).unwrap_or(&0) >= genre_cap(g) {
+            continue;
+        }
+        *genres.entry(g).or_insert(0) += 1;
+        out.push(to_album(a));
     }
-
-    pick(fresh, date, &mut rng)
+    /* 还是不够就放宽 */
+    for a in &cands {
+        if out.len() >= PER_DAY {
+            break;
+        }
+        if !out.iter().any(|x| x.id == a.id) {
+            out.push(to_album(a));
+        }
+    }
+    let md = day_md(date);
+    if !md.is_empty() {
+        if let Some(pos) = out.iter().position(|a| day_md(&a.date) == md) {
+            let mut hero = out.remove(pos);
+            hero.anniv = true;
+            out.insert(0, hero);
+        }
+    }
+    out
 }
 
-/// 今天这一屏：本地有就直接给，没有才联网抓
+/* ---------------- 命令 ---------------- */
+
+/// 今天这一屏：本地有就直接给，没有就从池子里挑（池子太小就现抓）
 #[tauri::command]
 pub async fn daily_today(app: AppHandle, date: String) -> Result<Today, String> {
     let mut store = load(&app);
     if let Some(day) = store.days.iter().find(|d| d.date == date) {
         if !day.albums.is_empty() {
+            pool::spawn_refresh_if_needed(app.clone());
             return Ok(Today { date, albums: day.albums.clone(), cached: true, stale: false });
         }
     }
 
-    let used: HashSet<String> =
-        store.days.iter().flat_map(|d| d.albums.iter().map(|a| a.id.clone())).collect();
-    let albums = fetch_day(&date, &used).await;
+    let rows = pool::load(&app);
+    let hist = History::build(&store, &date);
+    let mut albums = if rows.len() >= POOL_MIN {
+        select(&rows, &hist, &date, &mut Rng::new())
+    } else {
+        Vec::new()
+    };
+    if albums.is_empty() {
+        albums = fallback_fetch(&date, &store).await;
+    }
 
     if albums.is_empty() {
-        /* 联网没成：退回最近成功的那一天，画面不至于空白 */
         return match store.days.last() {
             Some(day) if !day.albums.is_empty() => Ok(Today {
                 date,
@@ -655,5 +603,98 @@ pub async fn daily_today(app: AppHandle, date: String) -> Result<Today, String> 
     }
     let _ = save(&app, &store);
 
+    /* 今天的已经给出来了，池子慢慢在后台攒 */
+    pool::spawn_refresh_if_needed(app.clone());
+
     Ok(Today { date, albums, cached: false, stale: false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_pool(modern: usize, classic: usize) -> Vec<PoolAlbum> {
+        let mut out = Vec::new();
+        for i in 0..modern {
+            out.push(PoolAlbum {
+                id: format!("m{i}"),
+                sf: "us".into(),
+                title: format!("Modern {i}"),
+                artist: format!("Artist M{i}"),
+                date: format!("202{}-05-05", i % 5),
+                genre: ["Pop", "Hip-Hop/Rap", "Electronic", "Rock"][i % 4].into(),
+                tracks: 10,
+                art: "https://example.com/a.jpg".into(),
+                key: format!("artist m{i}|modern {i}"),
+                score: 60 + (i % 30) as u8,
+                tier: (i % 4) as u8,
+                ..Default::default()
+            });
+        }
+        for i in 0..classic {
+            let year = 1960 + (i % 55) as u16;
+            out.push(PoolAlbum {
+                id: format!("c{i}"),
+                sf: "us".into(),
+                title: format!("Classic {i}"),
+                artist: format!("Artist C{i}"),
+                date: format!("{year}-03-03"),
+                genre: ["Rock", "Jazz", "Country", "Classical", "Pop"][i % 5].into(),
+                tracks: 11,
+                art: "https://example.com/b.jpg".into(),
+                key: format!("artist c{i}|classic {i}"),
+                classic: true,
+                score: 50 + (i % 40) as u8,
+                tier: (i % 4) as u8,
+                ..Default::default()
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn selection_shape() {
+        let pool = fake_pool(220, 220);
+        let hist = History::build(&Store::default(), "2026-09-17");
+        let out = select(&pool, &hist, "2026-09-17", &mut Rng::new());
+        println!("选出 {} 张", out.len());
+        let now_year = year_of("2026-09-17");
+        let modern = out.iter().filter(|a| year_of(&a.date) >= now_year - MODERN_YEARS).count();
+        let mut slots: Vec<u8> = out.iter().map(|a| era_slot(year_of(&a.date))).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        let mut artists: Vec<String> = out.iter().map(|a| norm_base(&a.artist)).collect();
+        artists.sort();
+        let before = artists.len();
+        artists.dedup();
+        println!(
+            "现代 {modern} 张，年代桶 {slots:?}，歌手去重 {before} → {}",
+            artists.len()
+        );
+        for a in &out {
+            println!("   {:<6} {} — {} ({})", year_of(&a.date), a.artist, a.title, a.genre);
+        }
+        assert_eq!(out.len(), PER_DAY, "没凑够 20 张");
+        assert_eq!(artists.len(), before, "有歌手一天上了两张");
+        assert!(modern >= N_MODERN, "现代位不够：{modern}");
+        let classic = out.len() - modern;
+        assert!(classic >= N_CLASSIC, "经典位不够：{classic}");
+        assert!(slots.len() >= 3, "年代不够分散：{slots:?}");
+    }
+
+    #[test]
+    fn selection_avoids_history() {
+        let pool = fake_pool(60, 60);
+        let mut store = Store::default();
+        store.days.push(Day {
+            date: "2026-09-16".into(),
+            albums: pool.iter().take(20).map(to_album).collect(),
+        });
+        let hist = History::build(&store, "2026-09-17");
+        let out = select(&pool, &hist, "2026-09-17", &mut Rng::new());
+        let old: std::collections::HashSet<&str> = store.days[0].albums.iter().map(|a| a.id.as_str()).collect();
+        let dup = out.iter().filter(|a| old.contains(a.id.as_str())).count();
+        println!("选出 {} 张，与昨天重复 {dup} 张；历史冷却集 {} 个", out.len(), hist.ids.len());
+        assert_eq!(dup, 0, "出现了 60 天内重复的专辑");
+    }
 }
