@@ -57,6 +57,64 @@
   /* 图还没到：把正在显示的那张磨成一团玻璃（模糊 + 压暗 + 轻微放大），
      而不是继续清清楚楚地留着上一张——快速连点「下一张」时尤其明显 */
   .art.blurred{filter:blur(26px) brightness(.6) saturate(1.05); transform:scale(1.07)}
+
+  /* ---------- 换图过渡动画：9 种，每次换图随机抽一种 ----------
+     id 要和 JS 里的 FX_LIST 一一对应；时长由 JS 写进 --fxms（480~560ms）。
+     托盘选「关闭」时不会加这些类，退回原来的交叉淡入。 */
+  #win.fxing .art{transition:none}          /* 动画期间不许 .art 自己的 transition 插手 */
+  .art.fx-next, .art.fx-prev{
+    animation-duration:var(--fxms,480ms);
+    animation-timing-function:var(--ease);
+    animation-fill-mode:both;
+  }
+  /* 1. 交叉淡入 */
+  .art.fx-next.fx-fade{animation-name:fx-fade-in}
+  .art.fx-prev.fx-fade{animation-name:fx-fade-out}
+  @keyframes fx-fade-in{from{opacity:0} to{opacity:1}}
+  @keyframes fx-fade-out{from{opacity:1} to{opacity:0}}
+  /* 2. 左推：新图从右边推进来，旧图往左退一小截（留景深） */
+  .art.fx-next.fx-push-left{animation-name:fx-pl-in}
+  .art.fx-prev.fx-push-left{animation-name:fx-pl-out}
+  @keyframes fx-pl-in{from{transform:translateX(100%)} to{transform:translateX(0)}}
+  @keyframes fx-pl-out{from{opacity:1; transform:translateX(0)} to{opacity:0; transform:translateX(-26%)}}
+  /* 3. 放大淡入 */
+  .art.fx-next.fx-zoom-in{animation-name:fx-zi-in}
+  .art.fx-prev.fx-zoom-in{animation-name:fx-zi-out}
+  @keyframes fx-zi-in{from{opacity:0; transform:scale(1.06)} to{opacity:1; transform:scale(1)}}
+  @keyframes fx-zi-out{from{opacity:1} to{opacity:0}}
+  /* 4. 缩小淡入 */
+  .art.fx-next.fx-zoom-out{animation-name:fx-zo-in}
+  .art.fx-prev.fx-zoom-out{animation-name:fx-zo-out}
+  @keyframes fx-zo-in{from{opacity:0; transform:scale(.94)} to{opacity:1; transform:scale(1)}}
+  @keyframes fx-zo-out{from{opacity:1} to{opacity:0}}
+  /* 5. 模糊溶解 */
+  .art.fx-next.fx-blur{animation-name:fx-bl-in}
+  .art.fx-prev.fx-blur{animation-name:fx-bl-out}
+  @keyframes fx-bl-in{from{opacity:0; filter:blur(22px)} to{opacity:1; filter:blur(0)}}
+  @keyframes fx-bl-out{from{opacity:1; filter:blur(0)} to{opacity:0; filter:blur(16px)}}
+  /* 6. 暗场过渡 */
+  .art.fx-next.fx-dim{animation-name:fx-dm-in}
+  .art.fx-prev.fx-dim{animation-name:fx-dm-out}
+  @keyframes fx-dm-in{from{opacity:0; filter:brightness(.5)} to{opacity:1; filter:brightness(1)}}
+  @keyframes fx-dm-out{from{opacity:1; filter:brightness(1)} to{opacity:0; filter:brightness(.3)}}
+  /* 7. 圆形揭开 */
+  .art.fx-next.fx-circle{animation-name:fx-ci-in}
+  .art.fx-prev.fx-circle{animation-name:fx-ci-out}
+  @keyframes fx-ci-in{from{clip-path:circle(0% at 50% 50%)} to{clip-path:circle(76% at 50% 50%)}}
+  @keyframes fx-ci-out{0%,70%{opacity:1} to{opacity:0}}
+  /* 8. 横向擦除（从左往右揭开） */
+  .art.fx-next.fx-wipe{animation-name:fx-wp-in}
+  .art.fx-prev.fx-wipe{animation-name:fx-wp-out}
+  @keyframes fx-wp-in{from{clip-path:inset(0 100% 0 0)} to{clip-path:inset(0 0 0 0)}}
+  @keyframes fx-wp-out{0%,70%{opacity:1} to{opacity:0}}
+  /* 9. 3D 翻页 */
+  .art.fx-next.fx-flip3d{animation-name:fx-f3-in}
+  .art.fx-prev.fx-flip3d{animation-name:fx-f3-out}
+  /* 负角度 = 右边缘朝观察者翻正，和新图「自右向左」推入同一个方向。
+     透视写在自己身上：#win 的 perspective 传不到这里（.face 有 overflow:hidden，preserve-3d 会被压平） */
+  @keyframes fx-f3-in{from{opacity:.12; transform:perspective(1600px) rotateY(-88deg)} to{opacity:1; transform:perspective(1600px) rotateY(0)}}
+  @keyframes fx-f3-out{0%,55%{opacity:1} to{opacity:0}}
+
   .frost{
     position:absolute; inset:0; pointer-events:none; opacity:0;
     background:rgba(10,10,12,.34);
@@ -827,6 +885,76 @@ const STORE = {
 const layers = [document.getElementById("artA"), document.getElementById("artB")];
 let layerTop = 1;
 
+/* ---------------- 换图过渡动画 ----------------
+   9 种，每次换图随机抽一种（连着两次不重样）。id 要和 CSS 里的 .fx-<id> 一一对应。
+   只留自左向右一种推入：多了四向推会和左右箭头的方向感打架。
+   gentle = 温和组：托盘选「温和」时只从这些里抽；「关闭」退回原来的交叉淡入。 */
+const FX_LIST = [
+  { id: "fade",       ms: 480, gentle: true  },
+  { id: "push-left",  ms: 480, gentle: true  },
+  { id: "zoom-in",    ms: 480, gentle: true  },
+  { id: "zoom-out",   ms: 480, gentle: true  },
+  { id: "blur",       ms: 480, gentle: true  },
+  { id: "dim",        ms: 500, gentle: false },
+  { id: "circle",     ms: 520, gentle: false },
+  { id: "wipe",       ms: 520, gentle: false },
+  { id: "flip3d",     ms: 560, gentle: false },
+];
+let fxMode = "random";      /* random | gentle | off，由托盘「过渡动画」决定 */
+let lastFx = "";            /* 上一次用的那种，避免连着重复 */
+let fxTimer = 0;
+let fxGen = 0;              /* 动画代次：连点「下一张」时，上一轮的回调直接作废 */
+
+/* 抽签；返回 null = 关闭特效，走原来的交叉淡入 */
+function pickFx(){
+  if (fxMode === "off") return null;
+  const pool = fxMode === "gentle" ? FX_LIST.filter((f) => f.gentle) : FX_LIST;
+  let f = pool[(Math.random() * pool.length) | 0];
+  for (let i = 0; i < 6 && f.id === lastFx; i++)
+    f = pool[(Math.random() * pool.length) | 0];
+  lastFx = f.id;
+  return f;
+}
+
+/* 把上一次没跑完的动画收干净（连点「下一张」时会走到） */
+function stopFx(){
+  if (fxTimer){ clearTimeout(fxTimer); fxTimer = 0; }
+  win.classList.remove("fxing");
+  for (const el of layers){
+    el.classList.remove("fx-next", "fx-prev");
+    for (const f of FX_LIST) el.classList.remove("fx-" + f.id);
+  }
+}
+
+/* 换图：把这一套动画挂到新旧两层上，跑完（或兜底超时）再收走 */
+function playFx(fx, next, cur){
+  stopFx();
+  const gen = ++fxGen;
+  const curLive = cur.classList.contains("in") && !!cur.getAttribute("src");
+  if (!fx){                                 /* 关闭特效：还是原来的交叉淡入 */
+    next.classList.add("in");
+    if (curLive) setTimeout(() => cur.classList.remove("in"), 260);
+    else cur.classList.remove("in");
+    return;
+  }
+  win.classList.add("fxing");
+  next.style.setProperty("--fxms", fx.ms + "ms");
+  next.classList.add("in", "fx-next", "fx-" + fx.id);
+  if (curLive){
+    cur.style.setProperty("--fxms", fx.ms + "ms");
+    cur.classList.add("fx-prev", "fx-" + fx.id);
+  }
+  const done = () => {
+    if (gen !== fxGen) return;               /* 已经被下一张顶掉了，这次收尾不许动手 */
+    if (fxTimer){ clearTimeout(fxTimer); fxTimer = 0; }
+    win.classList.remove("fxing");
+    next.classList.remove("fx-next", "fx-" + fx.id);
+    cur.classList.remove("fx-prev", "fx-" + fx.id, "in");
+  };
+  next.addEventListener("animationend", done, { once: true });
+  fxTimer = setTimeout(done, fx.ms + 80);   /* 兜底：动画事件万一没来也要收尾 */
+}
+
 function paint(album){
   const next = layers[1 - layerTop];
   const cur = layers[layerTop];
@@ -838,19 +966,20 @@ function paint(album){
     win.classList.add("loading");
     cur.classList.add("blurred");
   }, 120);
-  const settle = () => {
+  const settle = (fx) => {
     settled = true;
     clearTimeout(frostTimer);
     win.classList.remove("loading");
-    setTimeout(() => cur.classList.remove("blurred"), 460);   /* 等它淡出完再还原 */
+    /* 等旧图彻底退出（动画跑完）再撤掉毛玻璃，免得中途闪一下 */
+    setTimeout(() => cur.classList.remove("blurred"), (fx ? fx.ms : 420) + 60);
   };
   next.onload = () => {
-    next.classList.add("in");
-    setTimeout(() => cur.classList.remove("in"), 260);
+    const fx = pickFx();                      /* 每种动画随机抽，见 FX_LIST */
+    playFx(fx, next, cur);
     layerTop = 1 - layerTop;
     document.getElementById("boot").classList.add("off");
     errBox.hidden = true;
-    settle();
+    settle(fx);
     adaptChrome(next);                        /* 顶栏颜色跟着这张封面的亮度走 */
     carSync();                                /* 这张真正显示出来了，才开始倒数 */
   };
@@ -1458,6 +1587,8 @@ addEventListener("keydown", (e) => {
 
   /* 轮播档位由托盘菜单决定：启动问一次，之后听事件（改完立刻生效，不用重启） */
   invoke("get_carousel").then((v) => { carSec = Number(v) || 0; carSync(); }).catch(() => {});
+  /* 换图过渡动画档位同样由托盘决定 */
+  invoke("get_fx").then((v) => { fxMode = String(v || "random"); }).catch(() => {});
 
   /* 收藏：先拿本地封面目录，再读收藏列表（顺序别反，favToAlbum 要用到目录） */
   invoke("covers_dir_path")
@@ -1473,6 +1604,8 @@ addEventListener("keydown", (e) => {
     });
     /* 窗口收进托盘 / 重新显示：让轮播挂起与恢复（visibilitychange 之外的兜底） */
     T.event.listen("window-visible", (e) => { winVisible = !!e.payload; carSync(); });
+    /* 托盘改了过渡动画：下一张立刻按新档位抽签 */
+    T.event.listen("fx-changed", (e) => { fxMode = String(e.payload || "random"); lastFx = ""; });
   }
 
   /* 4. 右上角 ✕ → 收起到托盘（不退出） */

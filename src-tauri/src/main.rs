@@ -23,13 +23,17 @@ const BASE: f64 = 560.0;
 const SCALES: [u32; 5] = [50, 75, 100, 125, 150];
 /// 托盘里可选的轮播档位（秒），0 = 关闭
 const CAROUSELS: [u32; 5] = [0, 5, 8, 12, 20];
+/// 托盘里可选的换图过渡档位（random = 12 种随机，gentle = 只用温和的，off = 关掉）
+const FX_MODES: [&str; 3] = ["random", "gentle", "off"];
 
 struct Prefs {
     scale: Mutex<u32>,
     ontop: Mutex<bool>,
     carousel: Mutex<u32>,
+    fx: Mutex<String>,
     checks: Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>,
     car_checks: Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>,
+    fx_checks: Mutex<Vec<(String, CheckMenuItem<tauri::Wry>)>>,
     toggle: Mutex<Option<MenuItem<tauri::Wry>>>,
     ontop_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
@@ -38,19 +42,21 @@ fn prefs_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("prefs.json"))
 }
 
-/// 读偏好：(缩放档位, 是否置顶, 轮播秒数)
-fn load_prefs(app: &AppHandle) -> (u32, bool, u32) {
-    let Some(path) = prefs_file(app) else { return (100, false, 8) };
-    let Ok(text) = fs::read_to_string(path) else { return (100, false, 8) };
+/// 读偏好：(缩放档位, 是否置顶, 轮播秒数, 换图过渡档位)
+fn load_prefs(app: &AppHandle) -> (u32, bool, u32, String) {
+    let Some(path) = prefs_file(app) else { return (100, false, 8, "random".to_string()) };
+    let Ok(text) = fs::read_to_string(path) else { return (100, false, 8, "random".to_string()) };
     /* 有人用记事本改过就会有 BOM，先剥掉再解析，免得悄悄回退成默认值 */
     let text = text.trim_start_matches('\u{feff}');
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false, 8) };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return (100, false, 8, "random".to_string()) };
     let scale = json.get("scale").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
     let scale = if SCALES.contains(&scale) { scale } else { 100 };
     let ontop = json.get("alwaysOnTop").and_then(|v| v.as_bool()).unwrap_or(false);
     let carousel = json.get("carousel").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
     let carousel = if CAROUSELS.contains(&carousel) { carousel } else { 8 };
-    (scale, ontop, carousel)
+    let fx = json.get("fx").and_then(|v| v.as_str()).unwrap_or("random").to_string();
+    let fx = if FX_MODES.contains(&fx.as_str()) { fx } else { "random".to_string() };
+    (scale, ontop, carousel, fx)
 }
 
 /// 两个偏好一起写盘（改任意一个都重写整份，字段少、不折腾）
@@ -68,12 +74,16 @@ fn save_prefs(app: &AppHandle) {
         .as_ref()
         .and_then(|s| s.carousel.lock().ok().map(|v| *v))
         .unwrap_or(8);
+    let fx = state
+        .as_ref()
+        .and_then(|s| s.fx.lock().ok().map(|v| v.clone()))
+        .unwrap_or_else(|| "random".to_string());
     let Some(path) = prefs_file(app) else { return };
     if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
     let _ = fs::write(
         path,
         format!(
-            "{{\n  \"scale\": {scale},\n  \"alwaysOnTop\": {ontop},\n  \"carousel\": {carousel}\n}}\n"
+            "{{\n  \"scale\": {scale},\n  \"alwaysOnTop\": {ontop},\n  \"carousel\": {carousel},\n  \"fx\": \"{fx}\"\n}}\n"
         ),
     );
 }
@@ -90,6 +100,18 @@ fn set_carousel(app: &AppHandle, seconds: u32) {
     let _ = app.emit("carousel-changed", seconds);
 }
 
+/// 换图过渡档位：托盘勾选 + 写盘 + 通知界面立刻生效
+fn set_fx(app: &AppHandle, mode: String) {
+    if let Some(state) = app.try_state::<Prefs>() {
+        if let Ok(mut current) = state.fx.lock() { *current = mode.clone(); }
+        if let Ok(items) = state.fx_checks.lock() {
+            for (value, item) in items.iter() { let _ = item.set_checked(*value == mode); }
+        }
+    }
+    save_prefs(app);
+    let _ = app.emit("fx-changed", mode);
+}
+
 /// 窗口显示/隐藏：界面里的轮播据此挂起与恢复
 fn notify_visibility(app: &AppHandle, visible: bool) {
     let _ = app.emit("window-visible", visible);
@@ -101,6 +123,14 @@ fn get_carousel(app: AppHandle) -> u32 {
     app.try_state::<Prefs>()
         .and_then(|s| s.carousel.lock().ok().map(|v| *v))
         .unwrap_or(8)
+}
+
+/// 界面启动后问一次当前换图过渡档位
+#[tauri::command]
+fn get_fx(app: AppHandle) -> String {
+    app.try_state::<Prefs>()
+        .and_then(|s| s.fx.lock().ok().map(|v| v.clone()))
+        .unwrap_or_else(|| "random".to_string())
 }
 
 /// 缩放 = 窗口尺寸等比变化 + 界面 zoom 同比例变化，
@@ -187,6 +217,7 @@ fn build_tray(
     current_scale: u32,
     current_ontop: bool,
     current_carousel: u32,
+    current_fx: String,
 ) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "隐藏", true, None::<&str>)?;
     let ontop = CheckMenuItem::with_id(app, "ontop", "置顶", true, current_ontop, None::<&str>)?;
@@ -228,9 +259,27 @@ fn build_tray(
         .collect();
     let car_menu = Submenu::with_items(app, "轮播", true, &car_refs)?;
 
+    let mut fx_checks = Vec::new();
+    for (mode, label) in [("random", "随机"), ("gentle", "温和"), ("off", "关闭")] {
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("fx_{mode}"),
+            label,
+            true,
+            mode == current_fx,
+            None::<&str>,
+        )?;
+        fx_checks.push((mode.to_string(), item));
+    }
+    let fx_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = fx_checks
+        .iter()
+        .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    let fx_menu = Submenu::with_items(app, "过渡动画", true, &fx_refs)?;
+
     let menu = Menu::with_items(
         app,
-        &[&toggle, &ontop, &scale_menu, &car_menu, &separator, &quit],
+        &[&toggle, &ontop, &scale_menu, &car_menu, &fx_menu, &separator, &quit],
     )?;
 
     if let Some(state) = app.try_state::<Prefs>() {
@@ -238,6 +287,7 @@ fn build_tray(
         if let Ok(mut guard) = state.ontop_item.lock() { *guard = Some(ontop); }
         if let Ok(mut guard) = state.checks.lock() { *guard = checks; }
         if let Ok(mut guard) = state.car_checks.lock() { *guard = car_checks; }
+        if let Ok(mut guard) = state.fx_checks.lock() { *guard = fx_checks; }
     }
 
     TrayIconBuilder::with_id("coverart-tray")
@@ -253,6 +303,10 @@ fn build_tray(
             }
             if let Some(value) = id.strip_prefix("car_") {
                 if let Ok(seconds) = value.parse::<u32>() { set_carousel(app, seconds); }
+                return;
+            }
+            if let Some(value) = id.strip_prefix("fx_") {
+                set_fx(app, value.to_string());
                 return;
             }
             match id {
@@ -301,8 +355,10 @@ fn main() {
             scale: Mutex::new(100),
             ontop: Mutex::new(false),
             carousel: Mutex::new(8),
+            fx: Mutex::new("random".to_string()),
             checks: Mutex::new(Vec::new()),
             car_checks: Mutex::new(Vec::new()),
+            fx_checks: Mutex::new(Vec::new()),
             toggle: Mutex::new(None),
             ontop_item: Mutex::new(None),
         })
@@ -311,6 +367,7 @@ fn main() {
             start_drag,
             open_external,
             get_carousel,
+            get_fx,
             daily::daily_today,
             pool::pool_stats,
             favorites::list_favorites,
@@ -329,11 +386,12 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            let (scale, ontop, carousel) = load_prefs(&handle);
-            build_tray(&handle, scale, ontop, carousel)?;
+            let (scale, ontop, carousel, fx) = load_prefs(&handle);
+            build_tray(&handle, scale, ontop, carousel, fx.clone())?;
             apply_scale(&handle, scale);
             set_ontop(&handle, ontop);          /* 恢复上次的置顶状态 */
             set_carousel(&handle, carousel);    /* 恢复上次的轮播档位（顺便同步勾选） */
+            set_fx(&handle, fx);               /* 恢复上次的过渡动画档位 */
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
